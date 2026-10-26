@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "id": "dielerorn.remarkable",
+  "name": "reMarkable",
+  "version": "0.1.0",
+  "author": "Austin Larson",
+  "license": "MIT",
+  "repository": "https://github.com/Dielerorn/omarchy-remarkable",
+  "description": "Your reMarkable tablet on the desktop: browse and read notebooks in colour, send files, web pages and print jobs to it, turn notes and handwriting into searchable Markdown, and use developer mode for a live screen, pen input and backups",
+  "kinds": [
+    "service",
+    "bar-widget",
+    "panel"
+  ],
+  "keepLoaded": true,
+  "entryPoints": {
+    "service": "Service.qml",
+    "barWidget": "BarWidget.qml",
+    "panel": "Window.qml"
+  },
+  "barWidget": {
+    "displayName": "reMarkable",
+    "description": "Sync status, quick send and recent notebooks; opens the library window",
+    "category": "Tools",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "panelWidth": 400,
+      "recentCount": 5
+    },
+    "schema": [
+      {
+        "key": "panelWidth",
+        "type": "number",
+        "label": "Popout width",
+        "defaultValue": 400
+      },
+      {
+        "key": "recentCount",
+        "type": "number",
+        "label": "Recent documents shown in the popout",
+        "defaultValue": 5
+      }
+    ]
+  }
+}

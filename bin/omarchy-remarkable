@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# Entry point for everything the plugin does outside QML. Prints one JSON
+# object per command (the daemon prints one per line).
+#
+# The Python environment lives in ~/.local/share/omarchy-remarkable/venv and
+# bytecode in ~/.cache, never under the plugin directory: any write there
+# makes the Omarchy shell reload every plugin.
+set -euo pipefail
+
+self="$(readlink -f "${BASH_SOURCE[0]}")"
+plugin="$(cd "$(dirname "$self")/.." && pwd)"
+data="${XDG_DATA_HOME:-$HOME/.local/share}/omarchy-remarkable"
+cache="${XDG_CACHE_HOME:-$HOME/.cache}/omarchy-remarkable"
+
+export UV_PROJECT_ENVIRONMENT="$data/venv"
+export PYTHONPYCACHEPREFIX="$cache/pycache"
+export PYTHONPATH="$plugin/helper${PYTHONPATH:+:$PYTHONPATH}"
+export OMARCHY_REMARKABLE_PLUGIN="$plugin"
+
+lock_hash="$(sha1sum "$plugin/helper/uv.lock" | cut -c1-12)"
+stamp="$data/venv/.synced-$lock_hash"
+if [[ ! -e "$stamp" ]]; then
+  if ! command -v uv >/dev/null; then
+    echo '{"ok": false, "error": "uv is not installed (omarchy pkg add uv)"}'
+    exit 1
+  fi
+  mkdir -p "$data"
+  uv sync --project "$plugin/helper" --frozen --quiet >&2
+  rm -f "$data"/venv/.synced-*
+  touch "$stamp"
+fi
+
+exec "$data/venv/bin/python" -m rmbridge "$@"

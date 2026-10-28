@@ -202,6 +202,12 @@ tablet until you delete it or reset the tablet. It's the line ending in
   - Cloud access goes through rmapi, limited to a fixed set of commands. rmapi's
     account-wiping `nuke` command can't be called, and "delete" always means "move
     to the tablet's trash".
+  - Commands that name documents go to rmapi on standard input, one line per
+    command. So in names the plugin creates (uploads, renames, send-folder
+    subfolders), line breaks and control characters become spaces and `<<`
+    becomes `<`. A
+    cloud document that already has one in its name can't be moved or renamed
+    from here; rename it on the tablet first.
   - Pages are drawn with rmscene and PyMuPDF.
   - The printer is CUPS's own `ippeveprinter`, running as your user.
 - Developer-mode features use plain `ssh` with the plugin's own key and known-hosts

@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "dielerorn.remarkable",
   "name": "reMarkable",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "author": "Austin Larson",
   "license": "MIT",
   "repository": "https://github.com/Dielerorn/omarchy-remarkable",

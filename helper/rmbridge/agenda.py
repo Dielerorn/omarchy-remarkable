@@ -345,7 +345,7 @@ def send(start: date, days: int, folder: str, *, strict: bool = False) -> dict[s
     name = document_name(start)
     base = "/" + folder.strip("/") if folder.strip("/") else ""
     lib = library.fetch_library()
-    existing = lib.find_path(f"{base}/{cloud._safe_filename(name)}")
+    existing = lib.find_path(f"{base}/{cloud.safe_filename(name)}")
     if existing is not None:
         return {"ok": True, "skipped": True, "name": name, "folder": folder, "id": existing.id,
                 "reason": "already on the tablet"}

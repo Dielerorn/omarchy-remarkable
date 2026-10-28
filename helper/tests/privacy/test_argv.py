@@ -7,6 +7,7 @@ import io
 import json
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -106,3 +107,63 @@ def test_stdin_args_leave_later_lines_for_the_command(monkeypatch):
     monkeypatch.setattr(sys, "stdin", io.StringIO('["ssh", "setup"]\nhunter2\n'))
     assert cli.read_stdin_args() == ["ssh", "setup"]
     assert sys.stdin.readline() == "hunter2\n"
+
+
+# ----------------------------------------------- rmapi shell line framing
+
+# Each could end the line early, continue it, start a heredoc, or act as a
+# readline editing key (^U erases the line so far, ^C interrupts).
+FRAMING = ["\n", "\r", "\r\n", "\t", "\x00", "\x03", "\x15", "\x1b[A", "\x85", "\u2028", "\u2029", "<<EOF",
+           "\udcff"]
+
+
+@pytest.mark.parametrize("bad", FRAMING)
+def test_framing_characters_never_reach_rmapi(fake_rmapi, tmp_path, bad):
+    hostile = f"/Docs/report{bad}mv /Important /trash{bad}nuke"
+    for args in (["mv", hostile, "/trash"], ["mv", "/Docs/x", hostile], ["mkdir", hostile],
+                 ["put", str(tmp_path / f"x{bad}.pdf"), "/"]):
+        with pytest.raises(cloud.CloudError, match="can't be passed to rmapi safely"):
+            cloud.run(args)
+    assert not (tmp_path / "calls.jsonl").exists()  # rmapi never started
+
+
+@pytest.mark.parametrize("name", ["it's", 'say "hi"', "a\\b", "back\\", "#tag", "$HOME", "-n", "~x", "*?[x]",
+                                  "a  b", "Ünï 안녕 привет", "x; nuke", "x && nuke", "`nuke`", "'", '"', ""])
+def test_shell_line_is_exactly_one_command(name):
+    args = ["mv", f"/Docs/{name}", "/trash"]
+    line = cloud.shell_line(args)
+    assert line.endswith("\n") and line.count("\n") == 1
+    import shlex
+    assert shlex.split(line) == args
+
+
+def test_hostile_upload_filename_is_one_put(fake_rmapi, tmp_path):
+    """A file someone else named, sent as-is: still exactly one put, of a
+    staged copy with a clean name, and nothing else."""
+    import pymupdf
+    hostile = tmp_path / "in\nmv 'x' y\nnuke\n" / "Report\nmv Important trash\r\x15nuke.pdf"
+    hostile.parent.mkdir()
+    d = pymupdf.open()
+    d.new_page()
+    d.save(hostile)
+    cloud.upload(hostile, "")
+    lines = [c["stdin"] for c in fake_rmapi() if c["stdin"]]
+    assert len(lines) == 1 and lines[0].count("\n") == 1
+    import shlex
+    cmd = shlex.split(lines[0])
+    assert cmd[0] == "put" and len(cmd) == 3 and cmd[2] == "/"
+    assert Path(cmd[1]).name == "Report mv Important trash  nuke.pdf"
+    assert not cloud.framing_unsafe(cmd[1])
+
+
+def test_send_folder_subfolder_names_are_cleaned(tmp_path):
+    import os
+    from rmbridge import config, mirror
+    send = tmp_path / "send"
+    sub = send / "Books\nmv x y" / "Deep\u2028er"
+    sub.mkdir(parents=True)
+    f = sub / "a.pdf"
+    f.write_bytes(b"%PDF-1.4\n")
+    os.utime(f, (1, 1))
+    settings = dict(config.DEFAULTS, sendDir=str(send), uploadFolder="")
+    assert mirror.pending_sends(settings) == [(f, "Books mv x y/Deep er")]

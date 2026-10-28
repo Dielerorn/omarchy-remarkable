@@ -6,7 +6,10 @@ subcommands in ALLOWED: rmapi also has `nuke`, which empties the account.
 
 Commands whose arguments name documents or folders (VIA_STDIN) are typed
 into rmapi's shell on stdin instead of passed as arguments: every local
-account can read the process list.
+account can read the process list. That shell reads one command per line,
+continues a line ending in a backslash, starts a heredoc at "<<", and treats
+control characters as editing keys, so shell_line() only ever sends one
+quoted line and refuses arguments that could change how it's split.
 """
 
 from __future__ import annotations
@@ -21,6 +24,7 @@ import subprocess
 import tarfile
 import tempfile
 import time
+import unicodedata
 import urllib.request
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -114,7 +118,7 @@ def run(args: list[str], *, cwd: Path | None = None, timeout: int = 300, json_ou
         cmd.append("-json")
     line = None
     if args[0] in VIA_STDIN:
-        line = shlex.join(args) + "\n"
+        line = shell_line(args)
     else:
         cmd += args
     with _lock():
@@ -134,6 +138,34 @@ def run(args: list[str], *, cwd: Path | None = None, timeout: int = 300, json_ou
             raise NotPaired("the cloud login has expired; connect again")
         raise CloudError(_clean(message))
     return out
+
+
+# Line breaks, tab, NUL and readline's editing keys (Cc), the Unicode line and
+# paragraph separators, and lone surrogates (undecodable bytes in file names).
+FRAMING_CATEGORIES = ("Cc", "Cs", "Zl", "Zp")
+
+
+def framing_unsafe(text: str) -> bool:
+    """True if `text` could split or reshape a line in rmapi's shell."""
+    return "<<" in text or any(unicodedata.category(c) in FRAMING_CATEGORIES for c in text)
+
+
+def shell_line(args: list[str]) -> str:
+    """Exactly one quoted command line for rmapi's shell, or CloudError.
+
+    Every argument is checked, then the quoted line is parsed back (POSIX
+    rules, the same as the google/shlex parser rmapi's shell uses) and must
+    give back exactly `args`, so no other command can be selected.
+    """
+    if args[0] not in ALLOWED:
+        raise CloudError(f"refusing to run rmapi {args[:1]}")
+    if any(framing_unsafe(a) for a in args):
+        raise CloudError("a name with a line break, control character or \"<<\" can't be passed to "
+                         "rmapi safely; rename it first")
+    line = shlex.join(args)
+    if framing_unsafe(line) or shlex.split(line) != list(args) or line.rstrip().endswith("\\"):
+        raise CloudError("couldn't quote that rmapi command safely")
+    return line + "\n"
 
 
 def shell_output(out: str) -> tuple[str, str]:
@@ -293,10 +325,13 @@ def upload(local: Path, folder: str = "", *, name: str | None = None, cover_firs
         raise CloudError(f"{local} does not exist")
     src = local
     tmpdir = None
-    if name and name != local.stem:
-        # rmapi names the document after the file, so stage a renamed copy.
+    stem = safe_filename(name or local.stem)
+    if stem != local.stem or framing_unsafe(str(local)):
+        # rmapi names the document after the file, so stage a copy with the
+        # wanted (and shell-safe) name; the original path may not be safe.
         tmpdir = tempfile.mkdtemp(dir=config.TMP_DIR)
-        src = Path(tmpdir) / (_safe_filename(name) + local.suffix.lower())
+        suffix = "".join(c for c in local.suffix.lower() if c.isalnum() or c == ".")
+        src = Path(tmpdir) / (stem + suffix)
         shutil.copyfile(local, src)
     try:
         remote = _remote_dir(folder)
@@ -318,9 +353,14 @@ def upload(local: Path, folder: str = "", *, name: str | None = None, cover_firs
     return new
 
 
-def _safe_filename(name: str) -> str:
-    keep = "".join(c if c not in '/\\\0' else "-" for c in name).strip()
-    return keep[:150] or "Untitled"
+def safe_filename(name: str) -> str:
+    """A document or folder name rmapi can take: no path separators, no
+    line breaks or control characters, no "<<" (see shell_line)."""
+    keep = "".join("-" if c in "/\\" else " " if unicodedata.category(c) in FRAMING_CATEGORIES else c
+                   for c in name)
+    while "<<" in keep:
+        keep = keep.replace("<<", "<")
+    return keep.strip()[:150] or "Untitled"
 
 
 def ensure_folder(folder: str) -> None:
@@ -345,7 +385,7 @@ def move(entry: Entry, dest_folder: str, new_name: str | None = None) -> None:
     """Move and/or rename. dest_folder is a cloud path ("" = top level)."""
     target = _remote_dir(dest_folder)
     if new_name:
-        target = (target.rstrip("/") + "/" + _safe_filename(new_name)) if target != "/" else "/" + _safe_filename(new_name)
+        target = (target.rstrip("/") + "/" + safe_filename(new_name)) if target != "/" else "/" + safe_filename(new_name)
     run(["mv", entry.path, target])
     mark_self_write(entry.id)
 

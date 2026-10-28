@@ -789,7 +789,7 @@ def unique_name(name: str, folder: str) -> str:
     lib = cloud.library()
     base = "/" + folder.strip("/") if folder.strip("/") else ""
     candidate, n = name, 2
-    while lib.find_path(f"{base}/{cloud._safe_filename(candidate)}") is not None:
+    while lib.find_path(f"{base}/{cloud.safe_filename(candidate)}") is not None:
         candidate = f"{name} ({n})"
         n += 1
     return candidate

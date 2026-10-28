@@ -108,7 +108,8 @@ def pending_sends(settings: dict) -> list[tuple[Path, str]]:
             continue
         if now - f.stat().st_mtime < SETTLE_SECONDS:
             continue
-        folder = "/".join(rel.parts[:-1]) or settings["uploadFolder"]
+        # Subfolder names become cloud folder names, cleaned the same way.
+        folder = "/".join(cloud.safe_filename(part) for part in rel.parts[:-1]) or settings["uploadFolder"]
         out.append((f, folder))
     return out
 

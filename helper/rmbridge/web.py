@@ -4,12 +4,13 @@ page printed by headless Chromium when there's no article to pull out."""
 from __future__ import annotations
 
 import argparse
-import gzip
 import html
 import json
+import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import urllib.error
@@ -36,6 +37,18 @@ MAX_IMAGES = 40
 MAX_IMAGES_TOTAL = 30 * 1024 * 1024
 IMAGE_MAX_PX = 1400  # wider than this only costs upload time on a 1620 px screen
 MIN_IMAGE_PX = 40  # smaller ones are icons and tracking pixels
+READ_CHUNK = 64 * 1024
+TOTAL_TIMEOUT_FACTOR = 4  # a whole download gets 4× the per-read socket timeout
+# Decoding is where a small file turns big: a PNG can declare 100000×100000
+# pixels, an SVG can take minutes. So images are decoded in a child process
+# with its own memory and CPU limits, after a check of their declared size.
+MAX_IMAGE_PIXELS = 30_000_000
+# PyMuPDF reserves about 2 GiB of address space when it loads (its thread
+# pool deadlocks below that), so 3 GiB leaves ~1 GiB for decoding.
+DECODE_MEMORY = 3 * 1024 * 1024 * 1024
+DECODE_CPU_SECONDS = 120  # CPU for one decoder process, all its images together
+DECODE_TIMEOUT = 30  # wall time per image
+DECODE_BUDGET = 120  # wall time for all of an article's images
 MIN_ARTICLE_CHARS = 400  # below this the extraction missed the article
 BROWSERS = ("chromium", "google-chrome-stable", "google-chrome", "chromium-browser", "brave")
 XHTML_NS = "http://www.w3.org/1999/xhtml"
@@ -117,6 +130,53 @@ def normalize_url(raw: str) -> str:
     return url
 
 
+def read_body(r, limit: int, deadline: float, host: str) -> bytes:
+    """A response body, gzip/deflate decoded as it arrives. Never more than
+    `limit` bytes on the wire or after decoding (a few KB of gzip can expand
+    to gigabytes), and never past `deadline` (time.monotonic())."""
+    encoding = (r.headers.get("Content-Encoding") or "").strip().lower()
+    if encoding in ("", "identity"):
+        wbits = None
+    elif encoding in ("gzip", "x-gzip"):
+        wbits = 16 + zlib.MAX_WBITS
+    elif encoding == "deflate":
+        wbits = zlib.MAX_WBITS
+    else:
+        raise WebError(f"{host} sent the page {encoding}-encoded, which can't be read here")
+    dec = zlib.decompressobj(wbits) if wbits else None
+    too_big = WebError(f"{host} sent more than {limit // (1024 * 1024)} MB")
+    out = bytearray()
+    received = 0
+    while True:
+        if time.monotonic() > deadline:
+            raise WebError(f"{host} took too long to send everything")
+        chunk = r.read1(READ_CHUNK)
+        if not chunk:
+            break
+        received += len(chunk)
+        if received > limit:
+            raise too_big
+        if dec is None:
+            out += chunk
+        else:
+            try:
+                while chunk:
+                    out += dec.decompress(chunk, limit + 1 - len(out))
+                    if len(out) > limit:
+                        raise too_big
+                    if dec.eof:  # gzip allows several members back to back
+                        chunk = dec.unused_data
+                        if chunk:
+                            dec = zlib.decompressobj(wbits)
+                    else:
+                        chunk = dec.unconsumed_tail
+            except zlib.error as e:
+                raise WebError(f"{host} sent a damaged {encoding} stream") from e
+        if len(out) > limit:
+            raise too_big
+    return bytes(out)
+
+
 def fetch(url: str, *, limit: int = MAX_PAGE_BYTES, timeout: float = PAGE_TIMEOUT,
           accept: str = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8") -> tuple[bytes, str, str]:
     """GET a URL like a browser would. Returns (body, media type, final URL)."""
@@ -125,16 +185,10 @@ def fetch(url: str, *, limit: int = MAX_PAGE_BYTES, timeout: float = PAGE_TIMEOU
         "Accept-Language": "en-US,en;q=0.9", "Accept-Encoding": "gzip",
     })
     host = urllib.parse.urlsplit(url).netloc
+    deadline = time.monotonic() + timeout * TOTAL_TIMEOUT_FACTOR
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
-            data = r.read(limit + 1)
-            if len(data) > limit:
-                raise WebError(f"{host} sent more than {limit // (1024 * 1024)} MB")
-            encoding = (r.headers.get("Content-Encoding") or "").lower()
-            if encoding == "gzip":
-                data = gzip.decompress(data)
-            elif encoding == "deflate":
-                data = zlib.decompress(data)
+            data = read_body(r, limit, deadline, host)
             return data, r.headers.get_content_type(), r.geturl()
     except urllib.error.HTTPError as e:
         raise WebError(f"{host} answered {e.code} {e.reason}") from e
@@ -382,12 +436,47 @@ def extract(raw: bytes, url: str) -> Article | None:
 def _decode_data_uri(uri: str) -> bytes | None:
     import base64
     head, _, payload = uri.partition(",")
+    if len(payload) > MAX_IMAGE_BYTES * 3:  # base64 or %-escaped, well past the image budget
+        return None
     try:
-        if ";base64" in head:
-            return base64.b64decode(payload)
-        return urllib.parse.unquote_to_bytes(payload)
+        data = base64.b64decode(payload) if ";base64" in head else urllib.parse.unquote_to_bytes(payload)
     except ValueError:
         return None
+    return data if len(data) <= MAX_IMAGE_BYTES else None
+
+
+def declared_size(data: bytes) -> tuple[int, int] | None:
+    """(width, height) from a PNG, GIF, JPEG or WebP header, without decoding."""
+    import struct
+    if data[:8] == b"\x89PNG\r\n\x1a\n" and data[12:16] == b"IHDR":
+        return struct.unpack(">II", data[16:24])
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return struct.unpack("<HH", data[6:10])
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        kind = data[12:16]
+        if kind == b"VP8X" and len(data) >= 30:
+            return (int.from_bytes(data[24:27], "little") + 1, int.from_bytes(data[27:30], "little") + 1)
+        if kind == b"VP8L" and len(data) >= 25:
+            bits = int.from_bytes(data[21:25], "little")
+            return ((bits & 0x3FFF) + 1, ((bits >> 14) & 0x3FFF) + 1)
+        if kind == b"VP8 " and len(data) >= 30:
+            return (struct.unpack("<H", data[26:28])[0] & 0x3FFF, struct.unpack("<H", data[28:30])[0] & 0x3FFF)
+        return None
+    if data[:2] == b"\xff\xd8":
+        i = 2
+        while i + 9 < len(data):
+            if data[i] != 0xFF:
+                return None
+            marker = data[i + 1]
+            if marker in (0xD8, 0x01) or 0xD0 <= marker <= 0xD7:
+                i += 2
+                continue
+            length = struct.unpack(">H", data[i + 2:i + 4])[0]
+            if 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC):  # start of frame
+                h, w = struct.unpack(">HH", data[i + 5:i + 9])
+                return w, h
+            i += 2 + length
+    return None
 
 
 def _sniff_modern(data: bytes) -> str | None:
@@ -408,19 +497,31 @@ def _convert_modern(data: bytes) -> bytes | None:
     try:
         # The explicit "webp:"/"avif:" coder keeps ImageMagick from guessing
         # some other (scriptable) format from the bytes.
-        proc = subprocess.run([magick, f"{kind}:-[0]", "png:-"], input=data, capture_output=True, timeout=20)
+        proc = subprocess.run([magick, "-limit", "memory", "256MiB", "-limit", "map", "512MiB",
+                               "-limit", "area", f"{MAX_IMAGE_PIXELS}", "-limit", "disk", "0",
+                               "-limit", "time", "20", f"{kind}:-[0]", "png:-"],
+                              input=data, capture_output=True, timeout=20)
     except (OSError, subprocess.TimeoutExpired):
         return None
     return proc.stdout if proc.returncode == 0 and proc.stdout else None
 
 
+def too_many_pixels(size: tuple[int, int] | None) -> bool:
+    return size is not None and size[0] * size[1] > MAX_IMAGE_PIXELS
+
+
 def prepare_image(data: bytes) -> tuple[bytes, str] | None:
-    """Decode, shrink and re-encode one image; None if it isn't worth keeping."""
+    """Decode, shrink and re-encode one image; None if it isn't worth keeping.
+    Runs inside ImageDecoder's limited process (see download_images)."""
     import pymupdf
 
     pix = None
+    if too_many_pixels(declared_size(data)):
+        return None
     if _sniff_modern(data):
         data = _convert_modern(data) or b""
+        if too_many_pixels(declared_size(data)):
+            return None
     try:
         pix = pymupdf.Pixmap(data)
     except Exception:
@@ -428,7 +529,9 @@ def prepare_image(data: bytes) -> tuple[bytes, str] | None:
             with pymupdf.open(stream=data) as d:
                 if d.page_count:
                     page = d[0]
-                    zoom = min(4.0, IMAGE_MAX_PX / max(page.rect.width, 1))
+                    w, h = max(page.rect.width, 1), max(page.rect.height, 1)
+                    # At most IMAGE_MAX_PX wide and MAX_IMAGE_PIXELS in all.
+                    zoom = min(4.0, IMAGE_MAX_PX / w, (MAX_IMAGE_PIXELS / (w * h)) ** 0.5)
                     pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), alpha=False)
         except Exception:
             return None
@@ -471,14 +574,96 @@ def download_images(srcs: list[str], fetcher: Callable[[str], bytes | None] | No
     total = 0
     with ThreadPoolExecutor(max_workers=6) as pool:
         downloaded = list(pool.map(one, srcs))
-    # Decoding stays on this thread: PyMuPDF isn't thread-safe.
-    for i, data in enumerate(downloaded):
-        img = prepare_image(data) if data else None
-        if img is None or total + len(img[0]) > MAX_IMAGES_TOTAL:
-            continue
-        total += len(img[0])
-        results[i] = img
+    deadline = time.monotonic() + DECODE_BUDGET
+    with ImageDecoder() as decoder:
+        for i, data in enumerate(downloaded):
+            if time.monotonic() > deadline:
+                break
+            img = decoder.prepare(data) if data else None
+            if img is None or total + len(img[0]) > MAX_IMAGES_TOTAL:
+                continue
+            total += len(img[0])
+            results[i] = img
     return results
+
+
+def _limit_decoder(memory: int, cpu_seconds: int) -> None:
+    import resource
+    resource.setrlimit(resource.RLIMIT_AS, (memory, memory))
+    resource.setrlimit(resource.RLIMIT_CPU, (cpu_seconds, cpu_seconds))
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+
+
+class ImageDecoder:
+    """prepare_image() in a child process (rmbridge.imagedecode) with capped
+    memory and CPU, so a hostile image fails that process instead of the
+    helper, or the desktop through the kernel's out-of-memory killer. Images
+    go over a pipe; a child that dies or hangs is replaced for the next one."""
+
+    def __init__(self, memory: int = DECODE_MEMORY, cpu_seconds: int = DECODE_CPU_SECONDS,
+                 timeout: float = DECODE_TIMEOUT):
+        self.limits = (memory, cpu_seconds)
+        self.timeout = timeout
+        self.proc: subprocess.Popen | None = None
+
+    def __enter__(self) -> "ImageDecoder":
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
+
+    def _start(self) -> subprocess.Popen:
+        helper = str(Path(__file__).resolve().parents[1])
+        env = dict(os.environ, PYTHONPATH=helper + os.pathsep + os.environ.get("PYTHONPATH", ""))
+        memory, cpu = self.limits
+        return subprocess.Popen([sys.executable, "-m", "rmbridge.imagedecode"], stdin=subprocess.PIPE,
+                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env,
+                                preexec_fn=lambda: _limit_decoder(memory, cpu))
+
+    def _read(self, n: int, deadline: float) -> bytes | None:
+        import select
+        assert self.proc and self.proc.stdout
+        fd = self.proc.stdout.fileno()
+        out = bytearray()
+        while len(out) < n:
+            left = deadline - time.monotonic()
+            if left <= 0 or not select.select([fd], [], [], left)[0]:
+                return None
+            chunk = os.read(fd, n - len(out))
+            if not chunk:
+                return None
+            out += chunk
+        return bytes(out)
+
+    def prepare(self, data: bytes) -> tuple[bytes, str] | None:
+        try:
+            if self.proc is None or self.proc.poll() is not None:
+                self.proc = self._start()
+            assert self.proc.stdin
+            self.proc.stdin.write(len(data).to_bytes(4, "big") + data)
+            self.proc.stdin.flush()
+            deadline = time.monotonic() + self.timeout
+            head = self._read(5, deadline)
+            body = self._read(int.from_bytes(head[1:], "big"), deadline) if head else None
+        except OSError:  # it died while we wrote
+            head = body = None
+        if head is None or body is None:  # died (memory, CPU) or hung
+            self.close()
+            return None
+        media = {1: "image/png", 2: "image/jpeg"}.get(head[0])
+        return (body, media) if media else None
+
+    def close(self) -> None:
+        if self.proc is None:
+            return
+        try:
+            if self.proc.stdin:
+                self.proc.stdin.close()
+            self.proc.wait(timeout=2)
+        except (OSError, subprocess.TimeoutExpired):
+            self.proc.kill()
+            self.proc.wait()
+        self.proc = None
 
 
 def attach_images(article: Article, fetcher: Callable[[str], bytes | None] | None = None) -> None:

@@ -209,6 +209,10 @@ tablet until you delete it or reset the tablet. It's the line ending in
     cloud document that already has one in its name can't be moved or renamed
     from here; rename it on the tablet first.
   - Pages are drawn with rmscene and PyMuPDF.
+  - Web import reads at most 20 MB of a page (8 MB per image), measured after
+    decompression, and gives up on servers that send too slowly. Images are
+    checked for their declared size, then decoded in a separate process with
+    its own memory and CPU limits.
   - The printer is CUPS's own `ippeveprinter`, running as your user.
 - Developer-mode features use plain `ssh` with the plugin's own key and known-hosts
   file. They never touch `~/.ssh`.

@@ -25,7 +25,7 @@ from typing import Any, Callable
 
 from . import cloud, config
 
-VERSION = "0.1.2"
+VERSION = "0.1.3"
 TICK = 5
 
 

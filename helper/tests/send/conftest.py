@@ -39,7 +39,6 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setattr(printer, "JOBS_LOG", pdir / "jobs.jsonl")
     monkeypatch.setattr(printer, "STATE_FILE", dirs["RUNTIME_DIR"] / "printer.json")
     monkeypatch.setattr(printer, "LOCK_FILE", dirs["RUNTIME_DIR"] / "printer.lock")
-    monkeypatch.setattr(printer, "WRAPPER", dirs["RUNTIME_DIR"] / "printer-job")
     printer._cache.clear()
     for var in (printer.FOLDER_ENV, printer.DRYRUN_ENV):
         monkeypatch.delenv(var, raising=False)

@@ -38,18 +38,40 @@ def test_job_title(job, file, expected):
 
 def test_parse_log():
     p = printer.parse_log
-    assert p('[Job 3] Command - INFO: Sent to reMarkable as X') == {"event": "job-info", "job": 3,
-                                                                    "message": "Sent to reMarkable as X"}
-    assert p("[Job 3] Command - ERROR: the cloud login has expired")["event"] == "job-error"
-    assert p('[Job 3] Command "/run/printer-job" completed successfully.') == {"event": "job-done", "job": 3}
-    assert p('[Job 4] Command "/run/printer-job" exited with status 1.')["event"] == "job-failed"
     assert p('Created job file "/s/5-x.pdf", format "application/pdf".') == \
         {"event": "job-received", "file": "/s/5-x.pdf", "format": "application/pdf"}
     assert p("Ignored Avahi state 2.") == {"event": "dnssd", "state": "registered"}
     assert p("Ignored Avahi state 3.") == {"event": "dnssd", "state": "collision"}
     assert p("Accepted connection from localhost") is None
-    assert p('[Job 3] Command - {"progress": "uploading"}') is None
+    assert p("[Job 3] Processing.") is None
     assert p("Unable to bind socket: Address in use")["event"] == "log"
+    assert printer.job_id_of("/s/12-secret_title.pdf") == 12 and printer.job_id_of("/s/x.pdf") is None
+
+
+def test_ipp_command_keeps_job_titles_off_command_lines(monkeypatch):
+    monkeypatch.setattr(printer, "ippeveprinter", lambda: "/usr/bin/ippeveprinter")
+    cmd = printer.ipp_command(8631)
+    assert "-c" not in cmd and "-k" in cmd
+
+
+def test_ipp_request_and_response():
+    req = printer.ipp_get_job_request(8631, 7, request_id=3)
+    assert req[:8] == b"\x02\x00\x00\x09\x00\x00\x00\x03" and req.endswith(b"\x03")
+    assert b"ipp://localhost:8631/ipp/print" in req and b"job-name" in req and b"job-state" in req
+
+    def attr(tag, name, value):
+        return printer._ipp_attr(tag, name, value)
+    title = "Secret Title Ü".encode()
+    resp = (b"\x02\x00\x00\x00\x00\x00\x00\x03\x01" + attr(0x47, "attributes-charset", b"utf-8")
+            + b"\x02" + attr(0x42, "job-name", title) + attr(0x23, "job-state", (9).to_bytes(4, "big"))
+            + attr(0x49, "document-format", b"application/pdf")
+            + attr(0x36, "job-originating-user-name", b"\x00\x02en\x00\x05alice") + b"\x03")
+    status, attrs = printer.ipp_parse_response(resp)
+    assert status == 0
+    assert attrs["job-name"] == "Secret Title Ü" and attrs["job-state"] == 9
+    assert attrs["document-format"] == "application/pdf" and attrs["job-originating-user-name"] == "alice"
+    env = printer.job_env(attrs, 7, "", {"X": "1"})
+    assert env["IPP_JOB_NAME"] == "Secret Title Ü" and env["IPP_JOB_ID"] == "7" and env["X"] == "1"
 
 
 def make_pdf(path: Path, text: str = "hello") -> Path:
@@ -94,28 +116,22 @@ def test_handle_job_rejects_unknown_formats(tmp_path):
         printer.handle_job(src, job_env(CONTENT_TYPE="application/postscript"))
 
 
-def test_cmd_job_failure(tmp_path, monkeypatch, capsys, notifications, fake_cloud):
+def test_process_job_failure(tmp_path, monkeypatch, notifications, fake_cloud):
     src = make_pdf(tmp_path / "1-x.pdf")
 
     def expired(*a, **k):
         raise cloud.NotPaired("the cloud login has expired; connect again")
     monkeypatch.setattr("rmbridge.send.send_file", expired)
-    for k, v in job_env().items():
-        monkeypatch.setenv(k, v)
-    result = printer.cmd_job(argparse.Namespace(file=str(src)))
+    result = printer.process_job(src, job_env())
     assert result["ok"] is False and "expired" in result["error"]
-    assert "ERROR: the cloud login has expired" in capsys.readouterr().err
     assert notifications[0][0] == "Couldn't print to reMarkable"
     assert printer.last_jobs(1)[0]["ok"] is False
 
 
-def test_cmd_job_success(tmp_path, monkeypatch, capsys, notifications, fake_cloud):
+def test_process_job_success(tmp_path, notifications, fake_cloud):
     src = make_pdf(tmp_path / "1-x.pdf")
-    for k, v in job_env().items():
-        monkeypatch.setenv(k, v)
-    result = printer.cmd_job(argparse.Namespace(file=str(src)))
+    result = printer.process_job(src, job_env())
     assert result["ok"] and result["name"] == "Trip Plan"
-    assert "INFO: Sent to reMarkable as Trip Plan" in capsys.readouterr().err
     assert notifications == [("Printed to reMarkable", "Trip Plan", {"icon": "printer"})]
     assert printer.last_jobs(1)[0]["name"] == "Trip Plan"
 
@@ -127,15 +143,6 @@ def test_serve_command(monkeypatch):
     assert argv[-2:] == ["printer", "serve"]
     monkeypatch.setattr(printer, "ippeveprinter", lambda: None)
     assert printer.serve_command({"printerEnabled": True}) == []
-
-
-def test_wrapper_script():
-    path = printer.write_wrapper()
-    text = path.read_text()
-    assert os.access(path, os.X_OK)
-    assert text.startswith("#!/bin/sh\n")
-    assert f"export PYTHONPATH={HELPER}" in text
-    assert '-m rmbridge printer job "$1"' in text and sys.executable in text
 
 
 def test_status_when_stopped():
@@ -176,8 +183,8 @@ def _free_port() -> int:
 @pytest.mark.skipif(not (shutil.which("ippeveprinter") and shutil.which("ipptool")),
                     reason="needs CUPS's ippeveprinter and ipptool")
 def test_round_trip_dry_run(tmp_path):
-    """serve -> ipptool Print-Job -> job wrapper -> file in the dry-run dir,
-    then SIGTERM cleans everything up."""
+    """serve -> ipptool Print-Job -> job attributes over IPP -> file in the
+    dry-run dir, then SIGTERM cleans everything up."""
     env = dict(os.environ, PYTHONPATH=str(HELPER), XDG_RUNTIME_DIR=str(tmp_path / "run"),
                XDG_CACHE_HOME=str(tmp_path / "cache"), XDG_CONFIG_HOME=str(tmp_path / "config"),
                XDG_DATA_HOME=str(tmp_path / "data"))

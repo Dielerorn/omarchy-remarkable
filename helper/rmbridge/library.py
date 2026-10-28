@@ -196,7 +196,9 @@ def cmd_open(args: argparse.Namespace) -> dict:
     """Open an annotated copy in the desktop PDF viewer."""
     from .cli import open_path
     e, d = open_document(args.id)
-    target = config.CACHE_DIR / "open" / f"{safe_name(d.name)}.pdf"
+    # Named by id: the viewer gets this path on its command line, which every
+    # local account can read. Viewers show the title stored in the PDF.
+    target = config.CACHE_DIR / "open" / f"{d.id}.pdf"
     render.export_pdf(d, target)
     open_path(target)
     return _ok(path=str(target))

@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import gzip
 import html
+import json
 import re
 import shutil
 import subprocess
@@ -698,10 +699,16 @@ def print_page(url: str, target: Path, *, timeout: int = 120) -> Path:
         raise WebError("full-page mode needs Chromium or Google Chrome installed")
     target.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=config.TMP_DIR, prefix="chromium-") as profile:
+        # The browser starts on a local page that forwards to the URL, so the
+        # address isn't on its command line, which every local account can read.
+        start = Path(profile) / "start.html"
+        start.write_text('<!doctype html><meta charset="utf-8"><script>location.replace('
+                         + json.dumps(url).replace("<", "\\u003c") + ")</script>\n")
         cmd = [browser, "--headless", "--disable-gpu", "--no-pdf-header-footer", "--hide-scrollbars",
                "--no-first-run", "--no-default-browser-check", "--disable-extensions", "--mute-audio",
                "--disable-sync", "--run-all-compositor-stages-before-draw", "--virtual-time-budget=15000",
-               f"--user-data-dir={profile}", f"--user-agent={USER_AGENT}", f"--print-to-pdf={target}", url]
+               f"--user-data-dir={profile}", f"--user-agent={USER_AGENT}", f"--print-to-pdf={target}",
+               start.as_uri()]
         try:
             proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
                                   stdin=subprocess.DEVNULL)

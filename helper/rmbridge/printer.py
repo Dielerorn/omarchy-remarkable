@@ -3,9 +3,11 @@
 CUPS's ippeveprinter runs as the user and advertises an IPP Everywhere printer
 over DNS-SD (through the running avahi-daemon), so print dialogs list it
 without any setup. It only accepts PDF, which is what GTK, Chrome and CUPS
-send to driverless PDF printers. For each job it runs `printer job <file>`
-(through a small wrapper script, since -c takes a bare path), which uploads
-the file to settings["printFolder"].
+send to driverless PDF printers. `printer serve` reads ippeveprinter's log,
+asks it for each new job's attributes over IPP, and uploads the kept spool
+file to settings["printFolder"] from its own process. ippeveprinter's -c
+would run a command with the spool file, whose name holds the job title, on
+its command line, which every local account can read.
 
 Testing overrides (set in serve's environment, inherited by every job):
   OMARCHY_REMARKABLE_PRINT_FOLDER=F   upload into cloud folder F instead
@@ -17,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import http.client
 import json
 import os
 import re
@@ -26,6 +29,7 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -45,7 +49,6 @@ SPOOL_DIR = PRINTER_DIR / "spool"
 JOBS_LOG = PRINTER_DIR / "jobs.jsonl"
 STATE_FILE = config.RUNTIME_DIR / "printer.json"
 LOCK_FILE = config.RUNTIME_DIR / "printer.lock"
-WRAPPER = config.RUNTIME_DIR / "printer-job"
 
 SUFFIXES = {"application/pdf": ".pdf", "image/jpeg": ".jpg", "image/png": ".png", "text/plain": ".txt"}
 NAME_PREFIXES = ("Microsoft Word - ", "Microsoft PowerPoint - ", "Microsoft Excel - ")
@@ -169,28 +172,124 @@ def handle_job(path: Path, env: dict[str, str] | None = None) -> dict[str, Any]:
     return result
 
 
-def cmd_job(args: argparse.Namespace) -> dict:
-    """What ippeveprinter runs for each job. Lines on stderr starting with
-    INFO:/ERROR: become the job's status message in CUPS."""
+def process_job(path: Path, env: dict[str, str]) -> dict[str, Any]:
+    """Upload one job, record it for `printer status`, and say how it went."""
     from . import cloud
     from .cli import notify
 
-    config.ensure_dirs()
     try:
-        result = handle_job(Path(args.file))
+        result = handle_job(path, env)
     except (PrinterError, cloud.CloudError, OSError, ValueError) as e:
         message = str(e)
-        print(f"ERROR: {message}", file=sys.stderr, flush=True)
-        _record({"ok": False, "error": message, "job": os.environ.get("IPP_JOB_ID"),
-                 "jobName": os.environ.get("IPP_JOB_NAME", ""), "time": time.time()})
+        _record({"ok": False, "error": message, "job": env.get("IPP_JOB_ID"),
+                 "jobName": env.get("IPP_JOB_NAME", ""), "time": time.time()})
         notify("Couldn't print to reMarkable", message, icon="printer", urgency="critical")
-        return {"ok": False, "error": message, "code": "printer"}
+        return {"ok": False, "error": message}
     _record({"ok": True, **result})
-    where = f" ({result['file']})" if result.get("dryRun") else ""
-    print(f"INFO: Sent to reMarkable as {result['name']}{where}", file=sys.stderr, flush=True)
     if not result.get("dryRun"):
         notify("Printed to reMarkable", result["name"], icon="printer")
     return {"ok": True, **result}
+
+
+# ------------------------------------------------------------------- IPP
+
+IPP_TAGS_TEXT = {0x41, 0x42, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49}
+IPP_TAGS_INT = {0x21, 0x23}
+JOB_ATTRIBUTES = ("job-name", "job-state", "document-format", "job-originating-user-name")
+# job-state: 3 pending, 4 held, 5 processing, 6 stopped, 7 canceled, 8 aborted, 9 completed.
+JOB_RECEIVED, JOB_GONE = {5, 6, 9}, {7, 8}
+
+
+def _ipp_attr(tag: int, name: str, value: bytes) -> bytes:
+    n = name.encode()
+    return bytes([tag]) + len(n).to_bytes(2, "big") + n + len(value).to_bytes(2, "big") + value
+
+
+def ipp_get_job_request(port: int, job_id: int, request_id: int = 1) -> bytes:
+    body = b"\x02\x00" + (0x0009).to_bytes(2, "big") + request_id.to_bytes(4, "big") + b"\x01"
+    body += _ipp_attr(0x47, "attributes-charset", b"utf-8")
+    body += _ipp_attr(0x48, "attributes-natural-language", b"en")
+    body += _ipp_attr(0x45, "printer-uri", f"ipp://localhost:{port}/ipp/print".encode())
+    body += _ipp_attr(0x21, "job-id", job_id.to_bytes(4, "big", signed=True))
+    for i, name in enumerate(JOB_ATTRIBUTES):
+        body += _ipp_attr(0x44, "requested-attributes" if i == 0 else "", name.encode())
+    return body + b"\x03"
+
+
+def ipp_parse_response(data: bytes) -> tuple[int, dict[str, Any]]:
+    """(status code, {attribute: first value}) from an IPP response."""
+    status = int.from_bytes(data[2:4], "big")
+    attrs: dict[str, Any] = {}
+    i, name = 8, ""
+    while i < len(data):
+        tag = data[i]
+        i += 1
+        if tag == 0x03:
+            break
+        if tag < 0x10:  # the start of an attribute group
+            continue
+        nlen = int.from_bytes(data[i:i + 2], "big")
+        name = data[i + 2:i + 2 + nlen].decode("utf-8", "replace") or name
+        i += 2 + nlen
+        vlen = int.from_bytes(data[i:i + 2], "big")
+        raw = data[i + 2:i + 2 + vlen]
+        i += 2 + vlen
+        if name in attrs:
+            continue
+        if tag in IPP_TAGS_INT and vlen == 4:
+            attrs[name] = int.from_bytes(raw, "big", signed=True)
+        elif tag in IPP_TAGS_TEXT:
+            attrs[name] = raw.decode("utf-8", "replace")
+        elif tag in (0x35, 0x36) and vlen >= 4:  # text/name with language
+            llen = int.from_bytes(raw[:2], "big")
+            attrs[name] = raw[4 + llen:].decode("utf-8", "replace")
+    return status, attrs
+
+
+def job_attributes(port: int, job_id: int, timeout: float = 5) -> dict[str, Any]:
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
+    try:
+        conn.request("POST", "/ipp/print", ipp_get_job_request(port, job_id),
+                     {"Content-Type": "application/ipp"})
+        resp = conn.getresponse()
+        status, attrs = ipp_parse_response(resp.read())
+    finally:
+        conn.close()
+    if status >= 0x0400:
+        raise PrinterError(f"the printer doesn't know job {job_id} (IPP status {status:#06x})")
+    return attrs
+
+
+def wait_for_job(port: int, job_id: int, timeout: float = 600, interval: float = 0.5) -> dict[str, Any] | None:
+    """The job's attributes once its document is fully received, or None if
+    it was canceled or never arrived."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            attrs = job_attributes(port, job_id)
+        except (OSError, PrinterError):
+            attrs = {}
+        state = attrs.get("job-state")
+        if state in JOB_RECEIVED:
+            return attrs
+        if state in JOB_GONE:
+            return None
+        time.sleep(interval)
+    return None
+
+
+def job_env(attrs: dict[str, Any], job_id: int, fmt: str, base: dict[str, str]) -> dict[str, str]:
+    """The job as handle_job reads it (the same names ippeveprinter's -c used)."""
+    env = dict(base)
+    env.update(IPP_JOB_ID=str(job_id), IPP_JOB_NAME=str(attrs.get("job-name", "")),
+               CONTENT_TYPE=str(attrs.get("document-format") or fmt or ""),
+               IPP_JOB_ORIGINATING_USER_NAME=str(attrs.get("job-originating-user-name", "")))
+    return env
+
+
+def job_id_of(spool_file: str) -> int | None:
+    m = re.match(r"^(\d+)-", Path(spool_file).name)
+    return int(m.group(1)) if m else None
 
 
 # ------------------------------------------------------------------ server
@@ -222,24 +321,6 @@ def pick_port(wanted: int | None) -> int:
     raise PrinterError(f"ports {DEFAULT_PORT}-{DEFAULT_PORT + PORT_TRIES - 1} are all in use")
 
 
-def write_wrapper() -> Path:
-    """ippeveprinter's -c takes a bare executable path and passes the job
-    file as $1, so point it at a script that calls `printer job`."""
-    helper = Path(__file__).resolve().parents[1]
-    script = (
-        "#!/bin/sh\n"
-        f"export PYTHONPATH={shlex.quote(str(helper))}\n"
-        f"export PYTHONPYCACHEPREFIX={shlex.quote(str(config.CACHE_DIR / 'pycache'))}\n"
-        f'exec {shlex.quote(sys.executable)} -m rmbridge printer job "$1"\n'
-    )
-    WRAPPER.parent.mkdir(parents=True, exist_ok=True)
-    tmp = WRAPPER.with_suffix(".tmp")
-    tmp.write_text(script)
-    tmp.chmod(0o755)
-    tmp.replace(WRAPPER)
-    return WRAPPER
-
-
 def clean_spool(older_than: float = 3600) -> None:
     cutoff = time.time() - older_than
     for f in SPOOL_DIR.glob("*"):
@@ -254,8 +335,10 @@ def ipp_command(port: int, name: str = NAME) -> list[str]:
     exe = ippeveprinter()
     if not exe:
         raise PrinterError("ippeveprinter isn't installed (it comes with CUPS)")
-    return [exe, "-v", "-p", str(port), "-d", str(SPOOL_DIR), "-f", "application/pdf",
-            "-c", str(WRAPPER), "-M", "reMarkable", "-m", "Paper Pro", "-l", "Omarchy", name]
+    # No -c (see the module docstring): -k keeps each received document in
+    # SPOOL_DIR, owner-only, for serve to pick up.
+    return [exe, "-v", "-k", "-p", str(port), "-d", str(SPOOL_DIR), "-f", "application/pdf",
+            "-M", "reMarkable", "-m", "Paper Pro", "-l", "Omarchy", name]
 
 
 def _die_with_parent() -> None:
@@ -275,18 +358,9 @@ def parse_log(line: str) -> dict | None:
     line = line.rstrip()
     m = _JOB_LINE.match(line)
     if m:
-        job, text = int(m.group(1)), m.group(2)
-        if text.startswith("Command - "):
-            msg = text[len("Command - "):]
-            if msg.startswith("ERROR:"):
-                return {"event": "job-error", "job": job, "message": msg[6:].strip()}
-            if msg.startswith("INFO:"):
-                return {"event": "job-info", "job": job, "message": msg[5:].strip()}
-            return None  # progress lines and other output from the job
-        if "completed successfully" in text:
-            return {"event": "job-done", "job": job}
-        if "exited with status" in text or "terminated with signal" in text or "Unable to" in text:
-            return {"event": "job-failed", "job": job, "message": text}
+        text = m.group(2)
+        if "Unable to" in text or "error" in text.lower():
+            return {"event": "log", "message": line}
         return None
     m = re.search(r"Avahi state (\d+)", line)
     if m:
@@ -301,9 +375,50 @@ def parse_log(line: str) -> dict | None:
     return None
 
 
+_emit_lock = threading.Lock()
+
+
 def _emit(event: dict) -> None:
     event.setdefault("time", round(time.time(), 3))
-    print(json.dumps(event, default=str), flush=True)
+    with _emit_lock:
+        print(json.dumps(event, default=str), flush=True)
+
+
+def _remove_job_files(job_id: int) -> None:
+    for f in SPOOL_DIR.glob(f"{job_id}-*"):
+        f.unlink(missing_ok=True)
+
+
+class JobWorker(threading.Thread):
+    """Handles received jobs one at a time, in this process."""
+
+    def __init__(self, port: int, base_env: dict[str, str]):
+        super().__init__(daemon=True)
+        self.port, self.base_env = port, base_env
+        self.jobs: list[tuple[int, Path, str]] = []
+        self.ready = threading.Condition()
+
+    def add(self, job_id: int, path: Path, fmt: str) -> None:
+        with self.ready:
+            self.jobs.append((job_id, path, fmt))
+            self.ready.notify()
+
+    def run(self) -> None:
+        while True:
+            with self.ready:
+                while not self.jobs:
+                    self.ready.wait()
+                job_id, path, fmt = self.jobs.pop(0)
+            attrs = wait_for_job(self.port, job_id)
+            if attrs is None:
+                _remove_job_files(job_id)
+                _emit({"event": "job-failed", "job": job_id, "message": "canceled or never received"})
+                continue
+            result = process_job(path, job_env(attrs, job_id, fmt, self.base_env))
+            _remove_job_files(job_id)
+            clean_spool()
+            _emit({"event": "job-done" if result["ok"] else "job-failed", "job": job_id, "result": result,
+                   **({} if result["ok"] else {"message": result["error"]})})
 
 
 def cmd_serve(args: argparse.Namespace) -> dict | None:
@@ -321,8 +436,8 @@ def cmd_serve(args: argparse.Namespace) -> dict | None:
     try:
         port = pick_port(args.port)
         SPOOL_DIR.mkdir(parents=True, exist_ok=True)
+        SPOOL_DIR.chmod(0o700)
         clean_spool(0)
-        write_wrapper()
         cmd = ipp_command(port, args.name)
     except PrinterError as e:
         _emit({"event": "error", "ok": False, "error": str(e)})
@@ -347,6 +462,8 @@ def cmd_serve(args: argparse.Namespace) -> dict | None:
              "dryRun": env.get(DRYRUN_ENV), "folder": env.get(FOLDER_ENV)}
     config.write_json_atomic(STATE_FILE, state)
     _emit({"event": "started", **state})
+    worker = JobWorker(port, env)
+    worker.start()
     last_error = ""
     try:
         assert proc.stdout is not None
@@ -361,15 +478,11 @@ def cmd_serve(args: argparse.Namespace) -> dict | None:
             if event["event"] == "dnssd":
                 state["dnssd"] = event["state"]
                 config.write_json_atomic(STATE_FILE, state)
-            if event["event"] in ("job-done", "job-failed"):
-                # The document and its (empty) .prn output: ippeveprinter only
-                # removes them much later, and printed pages shouldn't linger.
-                for f in SPOOL_DIR.glob(f"{event['job']}-*"):
-                    f.unlink(missing_ok=True)
-                done = [j for j in last_jobs(5) if str(j.get("job")) == str(event["job"])]
-                if done:
-                    event["result"] = done[-1]
-                clean_spool()
+            if event["event"] == "job-received":
+                job_id = job_id_of(event["file"])
+                if job_id is not None:
+                    event["job"] = job_id
+                    worker.add(job_id, Path(event["file"]), event.get("format", ""))
             _emit(event)
     finally:
         if proc.poll() is None:
@@ -580,10 +693,6 @@ def register(sub) -> None:
     x.add_argument("--dry-run", metavar="DIR", help=f"copy jobs into DIR instead of uploading (sets {DRYRUN_ENV})")
     x.add_argument("--verbose", action="store_true", help="pass every ippeveprinter log line through")
     x.set_defaults(func=cmd_serve)
-
-    x = psub.add_parser("job", help="handle one print job (ippeveprinter runs this)")
-    x.add_argument("file")
-    x.set_defaults(func=cmd_job)
 
     x = psub.add_parser("status", help="running? advertised? installed as a CUPS queue?")
     x.set_defaults(func=cmd_status)

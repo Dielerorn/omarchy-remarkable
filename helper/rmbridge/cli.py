@@ -38,11 +38,25 @@ def progress(message: str, done: int | None = None, total: int | None = None) ->
     print(json.dumps(line), file=sys.stderr, flush=True)
 
 
+URGENCY = {"low": 0, "normal": 1, "critical": 2}
+
+
 def notify(title: str, body: str = "", *, icon: str = "document-edit", urgency: str = "normal") -> None:
+    """A desktop notification over D-Bus, from this process. Titles and
+    bodies hold document names, so they never go on a command line (the
+    process list is readable by every local account)."""
     try:
-        subprocess.Popen(["notify-send", "-a", "reMarkable", "-i", icon, "-u", urgency, title, body],
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except OSError:
+        from jeepney import DBusAddress, new_method_call
+        from jeepney.io.blocking import open_dbus_connection
+
+        server = DBusAddress("/org/freedesktop/Notifications", bus_name="org.freedesktop.Notifications",
+                             interface="org.freedesktop.Notifications")
+        hints = {"urgency": ("y", URGENCY.get(urgency, 1))}
+        msg = new_method_call(server, "Notify", "susssasa{sv}i",
+                              ("reMarkable", 0, icon, title, body, [], hints, -1))
+        with open_dbus_connection(bus="SESSION") as conn:
+            conn.send_and_get_reply(msg, timeout=5)
+    except Exception:  # no session bus or notification server: nothing to show it on
         pass
 
 
@@ -148,8 +162,31 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+STDIN_ARGS = "--stdin-args"
+
+
+def read_stdin_args() -> list[str] | None:
+    """The shell sends arguments as a JSON list on stdin's first line, so
+    document names, searches and paths never appear in the process list,
+    which every local account can read. Later lines stay for the command."""
+    try:
+        value = json.loads(sys.stdin.readline() or "null")
+    except ValueError:
+        return None
+    if isinstance(value, list) and all(isinstance(a, str) for a in value):
+        return value
+    return None
+
+
 def main(argv: list[str] | None = None) -> int:
     config.ensure_dirs()
+    argv = sys.argv[1:] if argv is None else argv
+    if argv == [STDIN_ARGS]:
+        argv = read_stdin_args()
+        if argv is None:
+            print(json.dumps({"ok": False, "error": f"{STDIN_ARGS} expects a JSON list of strings on stdin",
+                              "code": "internal"}), flush=True)
+            return 2
     parser = build_parser()
     args = parser.parse_args(argv)
     started = time.time()

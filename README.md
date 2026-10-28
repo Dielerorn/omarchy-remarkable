@@ -185,6 +185,13 @@ tablet until you delete it or reset the tablet. It's the line ending in
   or an API key. It only happens when you ask, or for the folders you choose. Turn
   it off on the Notes page.
 - Nothing else leaves your computer.
+- Other accounts on the same computer can read every program's command line. So
+  document names, searches, web links and print job titles never go on one: the
+  plugin passes them on standard input or over D-Bus. The exceptions are files you
+  open yourself (an export you open in your PDF viewer, or files you send from
+  your file manager's Open With menu), whose paths reach those programs the usual
+  way. The names of custom templates you add in developer mode are also part of
+  the command sent to the tablet over ssh.
 
 ## How it works
 

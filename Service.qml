@@ -188,34 +188,46 @@ QtObject {
   }
 
   // run(["doc", "thumb", id], function (r) {...}, "thumb:" + id)
+  //
+  // Arguments go to the helper as a JSON line on stdin, never in argv: the
+  // process list is readable by every local account, and these carry
+  // document names, searches, paths and links.
   function run(args, callback, key) {
-    if (key) {
-      if (busy[key]) return false
-      busy[key] = true
-      busyVersion++
-    }
-    var p = runner.createObject(root, { command: [root.bin].concat(args) })
-    p.callback = callback || null
-    p.key = key || ""
-    p.running = true
-    return true
+    return runWithInput(args, null, callback, key)
   }
 
-  // Like run(), but writes `input` to the command's stdin and closes it —
-  // used for the tablet's root password so it never appears in argv.
+  // Like run(), with more lines for the command to read from stdin after its
+  // arguments (the tablet's root password, the cloud pairing code).
   function runWithInput(args, input, callback, key) {
     if (key) {
       if (busy[key]) return false
       busy[key] = true
       busyVersion++
     }
-    var p = runner.createObject(root, { command: [root.bin].concat(args), stdinEnabled: true })
+    var p = runner.createObject(root, { command: [root.bin, "--stdin-args"], stdinEnabled: true })
     p.callback = callback || null
     p.key = key || ""
     p.running = true
-    p.write(String(input) + "\n")
+    p.write(JSON.stringify(args.map(String)) + "\n")
+    if (input !== null && input !== undefined) p.write(String(input) + "\n")
     p.stdinEnabled = false
     return true
+  }
+
+  // Put text on the clipboard without it passing through anyone's argv.
+  function copyText(text) {
+    var p = clipboard.createObject(root, {})
+    p.running = true
+    p.write(String(text))
+    p.stdinEnabled = false
+  }
+
+  property Component clipboard: Component {
+    Process {
+      command: ["wl-copy"]
+      stdinEnabled: true
+      onExited: destroy(1000)
+    }
   }
 
   // Ask for a file with the desktop chooser; callback gets a path or "".

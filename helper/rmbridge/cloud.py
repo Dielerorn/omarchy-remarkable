@@ -3,6 +3,10 @@
 rmapi does the sync protocol, so every write goes through a tool that already
 handles the cloud's generation checks. This module only ever runs the
 subcommands in ALLOWED: rmapi also has `nuke`, which empties the account.
+
+Commands whose arguments name documents or folders (VIA_STDIN) are typed
+into rmapi's shell on stdin instead of passed as arguments: every local
+account can read the process list.
 """
 
 from __future__ import annotations
@@ -11,6 +15,7 @@ import fcntl
 import hashlib
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import tarfile
@@ -30,6 +35,8 @@ RMAPI_SHA256 = "117616151d11937446ead6972b0934f97155443087f8406141db38fd1ac8fb25
 CONNECT_URL = "https://my.remarkable.com/device/browser/connect"
 
 ALLOWED = {"ls", "find", "stat", "get", "geta", "put", "mkdir", "mv", "account", "refresh", "version"}
+VIA_STDIN = {"ls", "stat", "geta", "put", "mkdir", "mv"}
+SHELL_BANNER = "ReMarkable Cloud API Shell"
 TRASH = "trash"
 
 
@@ -105,17 +112,40 @@ def run(args: list[str], *, cwd: Path | None = None, timeout: int = 300, json_ou
     cmd = [str(ensure_rmapi()), "-ni"]
     if json_out:
         cmd.append("-json")
-    cmd += args
+    line = None
+    if args[0] in VIA_STDIN:
+        line = shlex.join(args) + "\n"
+    else:
+        cmd += args
     with _lock():
-        proc = subprocess.run(cmd, cwd=cwd, env=_env(), capture_output=True, text=True, timeout=timeout)
+        proc = subprocess.run(cmd, cwd=cwd, env=_env(), input=line, capture_output=True, text=True,
+                              timeout=timeout)
     out = proc.stdout
     err = proc.stderr.strip()
+    if line is not None:
+        out, shell_error = shell_output(out)
+        if shell_error:
+            if "Enter one-time code" in out or "failed to get user token" in shell_error.lower():
+                raise NotPaired("the cloud login has expired; connect again")
+            raise CloudError(shell_error)
     if proc.returncode != 0 or "ERROR:" in err or out.lstrip().startswith("ERROR"):
         message = err or out.strip() or f"rmapi exited {proc.returncode}"
         if "Enter one-time code" in message or "failed to get user token" in message.lower():
             raise NotPaired("the cloud login has expired; connect again")
         raise CloudError(_clean(message))
     return out
+
+
+def shell_output(out: str) -> tuple[str, str]:
+    """rmapi's shell wraps a command's output in a banner line and a final
+    "EOF", and reports failures as "Error: ..." lines with exit code 0."""
+    lines = out.splitlines()
+    if lines and lines[0].startswith(SHELL_BANNER):
+        lines = lines[1:]
+    if lines and lines[-1].strip() == "EOF":
+        lines = lines[:-1]
+    errors = [l.split("Error:", 1)[1].strip() for l in lines if l.lstrip().startswith("Error:")]
+    return "\n".join(lines) + ("\n" if lines else ""), (errors[-1] if errors else "")
 
 
 def _clean(message: str) -> str:

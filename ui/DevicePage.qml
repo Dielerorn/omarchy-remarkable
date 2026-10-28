@@ -40,7 +40,7 @@ Flickable {
     var profile = (Quickshell.env("XDG_CACHE_HOME") || (Quickshell.env("HOME") + "/.cache")) + "/omarchy-remarkable/stream-browser"
     // The stream page has its own sign-in form: put the password on the
     // clipboard and say the username, rather than baking them into the URL.
-    if (r.password) Quickshell.execDetached(["sh", "-c", "printf %s \"$1\" | wl-copy", "sh", r.password])
+    if (r.password) root.service.copyText(r.password)
     if (r.username) root.service.say("Sign in as " + r.username + " — the password is on your clipboard")
     var args = ["chromium", "--user-data-dir=" + profile, "--app=" + r.url]
     // Over Wi-Fi the tablet serves HTTPS with its own certificate; this

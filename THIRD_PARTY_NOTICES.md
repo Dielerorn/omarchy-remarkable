@@ -51,6 +51,7 @@ first run, at the versions locked in `helper/uv.lock`.
 | [rmscene](https://github.com/ricklupton/rmscene) | MIT | Reading reMarkable pages (.rm v6) |
 | [PyMuPDF](https://github.com/pymupdf/PyMuPDF) | AGPL-3.0 (or a commercial licence from Artifex) | Drawing pages, PDF export, EPUB layout |
 | [trafilatura](https://github.com/adbar/trafilatura) | Apache-2.0 | Pulling the article out of a web page |
+| [jeepney](https://gitlab.com/takluyver/jeepney) | MIT | Desktop notifications over D-Bus |
 
 PyMuPDF and rmapi are AGPL-3.0. This repository doesn't contain or
 redistribute either one: your computer downloads them from their own sources.
@@ -66,6 +67,6 @@ These come from your system's packages and are used only when present:
 - `ssh` and `scp` (openssh): developer-mode features.
 - `zenity`: the file chooser.
 - `chromium` (or Chrome or Brave): the live-screen window, and web pages that only render in a browser.
-- `wl-copy` (wl-clipboard), `notify-send` (libnotify), `xdg-open` (xdg-utils).
+- `wl-copy` (wl-clipboard) and `xdg-open` (xdg-utils).
 - `claude` (Claude Code): handwriting to text, if you choose it.
 - `omarchy-calendar` ([omarchy-google-calendar](https://github.com/shivam-g10/omarchy-google-calendar)): calendar events on the agenda page.

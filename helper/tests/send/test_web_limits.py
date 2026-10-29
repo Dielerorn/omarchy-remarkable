@@ -146,11 +146,12 @@ def test_decoder_process_survives_bad_input_and_failures():
         assert d.prepare(b"junk") is None
         assert d.prepare(_png_header(100000, 100000)) is None
         assert d.prepare(png)[1] == "image/jpeg"
-    # A child that can't get going (here: starved of memory) costs one timeout
-    # and returns nothing; it never raises into the import.
+    # A child starved of memory either fails to load PyMuPDF (and answers
+    # "nothing") or hangs until the timeout and is killed. Either way the
+    # image is dropped and nothing raises into the import.
     with web.ImageDecoder(memory=1 << 30, timeout=3) as d:
         assert d.prepare(png) is None
-        assert d.proc is None
+        assert d.prepare(png) is None
 
 
 def test_data_uris_are_capped():

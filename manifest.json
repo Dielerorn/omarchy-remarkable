@@ -2,11 +2,11 @@
   "schemaVersion": 1,
   "id": "dielerorn.remarkable",
   "name": "reMarkable",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "author": "Austin Larson",
   "license": "MIT",
   "repository": "https://github.com/Dielerorn/omarchy-remarkable",
-  "description": "Your reMarkable tablet on the desktop: browse and read notebooks in colour, send files, web pages and print jobs to it, turn notes and handwriting into searchable Markdown, and use developer mode for a live screen, pen input and backups",
+  "description": "Your reMarkable tablet on the desktop: browse and read notebooks in colour, send files, web pages and print jobs to it, turn notes and handwriting into searchable Markdown, and use developer mode for pen input, backups and custom templates",
   "kinds": [
     "service",
     "bar-widget",

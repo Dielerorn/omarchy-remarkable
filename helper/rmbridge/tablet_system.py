@@ -185,11 +185,20 @@ def remember(section: str, key: str, value: dict | None) -> None:
 # ------------------------------------------------------------- images
 
 
+MAX_IMPORT_BYTES = 50 * 1024 * 1024  # an image or PDF to use as a template or sleep screen
+
+
 def fit_png(src: Path, width: int = SCREEN_W, height: int = SCREEN_H) -> tuple[bytes, dict]:
     """The image as a PNG of exactly width x height, letterboxed on white.
 
     Returns the bytes and what was done, so the caller can say so.
     """
+    from .web import MAX_IMAGE_PIXELS, declared_size, too_many_pixels
+    if src.stat().st_size > MAX_IMPORT_BYTES:
+        raise ValueError(f"{src.name} is larger than {MAX_IMPORT_BYTES >> 20} MB")
+    with open(src, "rb") as f:
+        if too_many_pixels(declared_size(f.read(256 * 1024))):
+            raise ValueError(f"{src.name} is larger than {MAX_IMAGE_PIXELS // 1_000_000} megapixels")
     import pymupdf
 
     try:

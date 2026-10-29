@@ -19,7 +19,6 @@ Flickable {
 
   property string account: ""
   property bool penRunning: false
-  property var stream: null
   property string pendingImage: ""
 
   function busy(key) { var _ = service ? service.busyVersion : 0; return service ? service.isBusy(key) : false }
@@ -33,20 +32,6 @@ Flickable {
 
   function refreshDevModeState() {
     service.run(["ssh", "pen", "status"], function (r) { root.penRunning = !!(r.ok && r.running) })
-    service.run(["ssh", "stream", "status"], function (r) { root.stream = r.ok && r.running ? r : null })
-  }
-
-  function openStream(r) {
-    var profile = (Quickshell.env("XDG_CACHE_HOME") || (Quickshell.env("HOME") + "/.cache")) + "/omarchy-remarkable/stream-browser"
-    // The stream page has its own sign-in form: put the password on the
-    // clipboard and say the username, rather than baking them into the URL.
-    if (r.password) root.service.copyText(r.password)
-    if (r.username) root.service.say("Sign in as " + r.username + " — the password is on your clipboard")
-    var args = ["chromium", "--user-data-dir=" + profile, "--app=" + r.url]
-    // Over Wi-Fi the tablet serves HTTPS with its own certificate; this
-    // throwaway profile is only ever used for the tablet.
-    if (String(r.url).indexOf("https://") === 0) args.splice(2, 0, "--ignore-certificate-errors")
-    Quickshell.execDetached(args)
   }
 
   contentHeight: col.implicitHeight + Style.spacing.huge * 2
@@ -191,31 +176,6 @@ Flickable {
         spacing: Style.spacing.lg
 
         PanelSeparator { Layout.fillWidth: true }
-
-        ActionRow {
-          title: "Live screen"
-          description: root.stream ? "Streaming. It opens in its own window." : "Watch the tablet's screen in a window, e.g. to share it in a call. Runs a small streaming program on the tablet while it's open."
-          Button {
-            text: root.stream ? "Show" : "Start"
-            iconText: G.cast
-            bordered: true
-            iconSpinning: root.busy("stream")
-            onClicked: {
-              if (root.stream) { root.openStream(root.stream); return }
-              root.service.run(["ssh", "stream", "start"], function (r) {
-                if (!r.ok) { root.service.say(r.error || "Couldn't start the stream", true); return }
-                root.stream = r
-                root.openStream(r)
-              }, "stream")
-            }
-          }
-          Button {
-            visible: !!root.stream
-            text: "Stop"
-            bordered: true
-            onClicked: root.service.act(["ssh", "stream", "stop"], "stream", "Stream stopped", function () { root.stream = null })
-          }
-        }
 
         ActionRow {
           title: "Pen as a drawing tablet"

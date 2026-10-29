@@ -28,8 +28,9 @@ that app does, and adds a few things it doesn't do.
 - Web pages: a clean, readable EPUB or PDF of an article. From the window, the
   popout, or the link on your clipboard.
 - Screenshots: sends your newest Omarchy or Framelet screenshot.
-- **Print to reMarkable**: a printer called "reMarkable" appears in every app's print
-  dialog. It runs as your user, nothing system-wide.
+- **Print to reMarkable**: a printer called "reMarkable" in every app's print dialog,
+  after one click on **Add to print dialogs** (Send page). It runs as your user and
+  listens only on this computer, so nothing on your network can print to it.
 - **Morning agenda**: a page with today's Google Calendar events and tasks, plus
   ruled space to write. Send it on demand or every morning.
 - **Send folder**: save anything into `~/reMarkable/Send` and it goes to the tablet.
@@ -55,7 +56,6 @@ that app does, and adds a few things it doesn't do.
 
 **Developer mode** (if you've enabled it on the tablet)
 - Battery, storage and software version in the bar and the window.
-- Live screen in a window (uses goMarkableStream).
 - Use the tablet and Marker as a pen tablet for this computer. It appears to Hyprland as
   `omarchy-remarkable-pen`; map it to one monitor with `input:tablet:output`.
 - Copy the tablet's page templates so notebooks show their lines and grids here too.
@@ -95,7 +95,11 @@ Then:
    once under Device → Developer mode. The password is shown on the tablet in
    Settings → General → Help → About → Copyrights and licenses. The plugin installs its
    own SSH key and doesn't keep the password.
-3. Optional: under Settings → Desktop, add "Send to reMarkable" to Open With menus and
+3. Optional: **Send** → **Print to reMarkable** → **Add to print dialogs**. This adds
+   a CUPS printer pointing at the plugin's own printer on this computer, using
+   `lpadmin`. If CUPS wants an administrator for that, the page shows the exact
+   command to run in a terminal; it asks for your password once.
+4. Optional: under Settings → Desktop, add "Send to reMarkable" to Open With menus and
    put the `omarchy-remarkable` command on your PATH.
 
 The first run takes a minute: `uv` downloads the Python libraries into
@@ -159,6 +163,8 @@ Omarchy shell reload every plugin.
 ```sh
 # Take out the Open With entry and the command link, if you added them
 ~/.config/omarchy/plugins/dielerorn.remarkable/bin/omarchy-remarkable desktop remove
+# Take the printer out of print dialogs, if you added it
+~/.config/omarchy/plugins/dielerorn.remarkable/bin/omarchy-remarkable printer remove
 # Sign this computer out of your reMarkable cloud
 ~/.config/omarchy/plugins/dielerorn.remarkable/bin/omarchy-remarkable cloud unpair
 omarchy plugin remove dielerorn.remarkable
@@ -185,6 +191,9 @@ tablet until you delete it or reset the tablet. It's the line ending in
   or an API key. It only happens when you ask, or for the folders you choose. Turn
   it off on the Notes page.
 - Nothing else leaves your computer.
+- The plugin's own folders (`~/.config/omarchy-remarkable`, `~/.cache/omarchy-remarkable`,
+  `~/.local/share/omarchy-remarkable`) are readable only by you, and so is
+  everything the helper writes, including exports and notes.
 - Other accounts on the same computer can read every program's command line. So
   document names, searches, web links and print job titles never go on one: the
   plugin passes them on standard input or over D-Bus. The exceptions are files you
@@ -213,7 +222,11 @@ tablet until you delete it or reset the tablet. It's the line ending in
     decompression, and gives up on servers that send too slowly. Images are
     checked for their declared size, then decoded in a separate process with
     its own memory and CPU limits.
-  - The printer is CUPS's own `ippeveprinter`, running as your user.
+  - The printer is CUPS's own `ippeveprinter`, running as your user and listening
+    on localhost only. It still announces itself on the network over DNS-SD, because
+    ippeveprinter won't run without that, but it refuses connections from other
+    machines. Other accounts on this computer can print to it, like any local
+    printer.
 - Developer-mode features use plain `ssh` with the plugin's own key and known-hosts
   file. They never touch `~/.ssh`.
 
@@ -232,9 +245,8 @@ every plugin.
 
 Pen rendering adapted from [rmc](https://github.com/ricklupton/rmc) (MIT). It uses
 [rmapi](https://github.com/ddvk/rmapi), [rmscene](https://github.com/ricklupton/rmscene),
-[PyMuPDF](https://pymupdf.readthedocs.io), [trafilatura](https://trafilatura.readthedocs.io)
-and [goMarkableStream](https://github.com/owulveryck/goMarkableStream). See
-THIRD_PARTY_NOTICES.md.
+[PyMuPDF](https://pymupdf.readthedocs.io) and [trafilatura](https://trafilatura.readthedocs.io).
+See THIRD_PARTY_NOTICES.md.
 
 ## Licence
 

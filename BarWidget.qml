@@ -117,7 +117,7 @@ Panel {
             var parts = []
             if (s.device && s.device.battery !== undefined) parts.push((s.device.charging ? G.charging : G.battery) + " " + Math.round(s.device.battery) + "%")
             if (s.usb && s.usb.connected) parts.push(G.usb + " USB")
-            if (s.printer && s.printer.running) parts.push(G.printer + " printer ready")
+            if (s.printer && s.printer.ready) parts.push(G.printer + " printer ready")
             return parts.join("    ")
           }
           color: Util.alpha(root.panelForeground, 0.7)

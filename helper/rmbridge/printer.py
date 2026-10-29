@@ -1,9 +1,12 @@
 """A "reMarkable" printer on this computer, no root needed.
 
-CUPS's ippeveprinter runs as the user and advertises an IPP Everywhere printer
-over DNS-SD (through the running avahi-daemon), so print dialogs list it
-without any setup. It only accepts PDF, which is what GTK, Chrome and CUPS
-send to driverless PDF printers. `printer serve` reads ippeveprinter's log,
+CUPS's ippeveprinter runs as the user, listening on localhost only (-n
+localhost): anyone who could reach it could put documents in your cloud.
+Print dialogs use a CUPS queue pointing at it (`printer install`, the "Add to
+print dialogs" button), since its DNS-SD advert, which ippeveprinter always
+makes, names this computer's network address, which it doesn't listen on.
+It only accepts PDF, which is what GTK, Chrome and CUPS send to driverless
+PDF printers. `printer serve` reads ippeveprinter's log,
 asks it for each new job's attributes over IPP, and uploads the kept spool
 file to settings["printFolder"] from its own process. ippeveprinter's -c
 would run a command with the spool file, whose name holds the job title, on
@@ -337,7 +340,7 @@ def ipp_command(port: int, name: str = NAME) -> list[str]:
         raise PrinterError("ippeveprinter isn't installed (it comes with CUPS)")
     # No -c (see the module docstring): -k keeps each received document in
     # SPOOL_DIR, owner-only, for serve to pick up.
-    return [exe, "-v", "-k", "-p", str(port), "-d", str(SPOOL_DIR), "-f", "application/pdf",
+    return [exe, "-v", "-k", "-n", "localhost", "-p", str(port), "-d", str(SPOOL_DIR), "-f", "application/pdf",
             "-M", "reMarkable", "-m", "Paper Pro", "-l", "Omarchy", name]
 
 
@@ -617,10 +620,12 @@ def status(fresh: bool = False) -> dict:
             result["interfaces"] = sorted({a["interface"] for a in ours})
         if dnssd in ("collision", "failed") and not result["advertised"]:
             result["error"] = "print dialogs can't see the printer (DNS-SD registration failed; is avahi-daemon running?)"
-    q = _cached("queue", 0 if fresh else 120, queue_info)
+    q = _cached("queue", 0 if fresh else 15, queue_info)
     result["queue"] = q
     if q and port:
         result["queueMatches"] = q["uri"].startswith(f"ipp://localhost:{port}/")
+    # Print dialogs reach it only through the CUPS queue (see the module docstring).
+    result["ready"] = bool(running and q and result.get("queueMatches"))
     if not result["installed"]:
         result["error"] = "ippeveprinter isn't installed (it comes with CUPS)"
     elif alive and not running:

@@ -1,5 +1,5 @@
 """Developer-mode features over SSH: status, setup, device info, backups,
-templates, sleep screen, live screen and the pen as a drawing tablet.
+templates, sleep screen and the pen as a drawing tablet.
 
 Daemon-facing functions: reachable(), info(), fetch_templates(). Commands are
 registered under `ssh`. The heavy lifting lives in the tablet_* modules;
@@ -518,34 +518,6 @@ def cmd_sleep_restore(args: argparse.Namespace) -> dict:
     return _ok(**ts.sleepscreen_restore(tr.connect(), restart=args.restart))
 
 
-# ================================================================ live screen
-
-
-@guarded
-def cmd_stream_start(args: argparse.Namespace) -> dict:
-    from . import tablet_stream
-    from .cli import progress
-    tls = True if args.tls else (False if args.no_tls else None)
-    return _ok(**tablet_stream.start(tr.connect(), tls=tls, on_progress=progress))
-
-
-@guarded
-def cmd_stream_stop(args: argparse.Namespace) -> dict:
-    from . import tablet_stream
-    return _ok(**tablet_stream.stop(tr.connect()))
-
-
-def cmd_stream_status(args: argparse.Namespace) -> dict:
-    from . import tablet_stream
-    host, _ = tr.settings_target()
-    if not tr.tcp_open(host, 22, timeout=1.5):
-        return _ok(running=False, reachable=False, host=host)
-    try:
-        return _ok(reachable=True, **tablet_stream.status(tr.connect()))
-    except TabletError as e:
-        return _ok(running=False, reachable=False, host=host, problem=str(e))
-
-
 # ================================================================ pen
 
 
@@ -767,18 +739,6 @@ def register(sub) -> None:
     x.add_argument("--restart", action="store_true")
     x.add_argument("--yes", action="store_true")
     x.set_defaults(func=cmd_sleep_restore)
-
-    v = s.add_parser("stream", help="live view of the tablet's screen").add_subparsers(
-        dest="stream_action", required=True)
-    x = v.add_parser("start")
-    o = x.add_mutually_exclusive_group()
-    o.add_argument("--tls", action="store_true", help="force HTTPS")
-    o.add_argument("--no-tls", action="store_true", help="force plain HTTP")
-    x.set_defaults(func=cmd_stream_start)
-    x = v.add_parser("stop")
-    x.set_defaults(func=cmd_stream_stop)
-    x = v.add_parser("status")
-    x.set_defaults(func=cmd_stream_status)
 
     from .tablet_pen import ORIENTATIONS
     n = s.add_parser("pen", help="use the Marker as a drawing tablet").add_subparsers(

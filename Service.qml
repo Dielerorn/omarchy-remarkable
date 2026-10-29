@@ -214,22 +214,6 @@ QtObject {
     return true
   }
 
-  // Put text on the clipboard without it passing through anyone's argv.
-  function copyText(text) {
-    var p = clipboard.createObject(root, {})
-    p.running = true
-    p.write(String(text))
-    p.stdinEnabled = false
-  }
-
-  property Component clipboard: Component {
-    Process {
-      command: ["wl-copy"]
-      stdinEnabled: true
-      onExited: destroy(1000)
-    }
-  }
-
   // Ask for a file with the desktop chooser; callback gets a path or "".
   function pick(kind, callback) {
     run(["pick", "--kind", kind || "any"], function (r) {

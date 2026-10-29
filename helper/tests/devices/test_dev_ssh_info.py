@@ -228,11 +228,9 @@ def test_setup_passes_password_through_askpass(monkeypatch, capsys, isolated):
     assert not (isolated / "run" / "askpass.sh").exists()
 
 
-def test_status_and_stream_status_when_unreachable(monkeypatch, capsys):
+def test_status_and_pen_status_when_unreachable(monkeypatch, capsys):
     monkeypatch.setattr(tr, "tcp_open", lambda *a, **k: False)
     status = run_cli(["ssh", "status"], capsys)
     assert status["ok"] and status["reachable"] is False and "rm-ssh-over-wlan" in status["hint"]
-    stream = run_cli(["ssh", "stream", "status"], capsys)
-    assert stream["ok"] and stream["running"] is False
     pen = run_cli(["ssh", "pen", "status"], capsys)
     assert pen["ok"] and pen["running"] is False

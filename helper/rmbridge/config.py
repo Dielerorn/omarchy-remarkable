@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -23,7 +24,9 @@ def _xdg(var: str, fallback: str) -> Path:
 CONFIG_DIR = _xdg("XDG_CONFIG_HOME", ".config") / "omarchy-remarkable"
 CACHE_DIR = _xdg("XDG_CACHE_HOME", ".cache") / "omarchy-remarkable"
 DATA_DIR = _xdg("XDG_DATA_HOME", ".local/share") / "omarchy-remarkable"
-RUNTIME_DIR = Path(os.environ.get("XDG_RUNTIME_DIR", tempfile.gettempdir())) / "omarchy-remarkable"
+# Without XDG_RUNTIME_DIR, not a guessable path under the shared /tmp.
+RUNTIME_DIR = (Path(os.environ["XDG_RUNTIME_DIR"]) if os.environ.get("XDG_RUNTIME_DIR")
+               else CACHE_DIR / "run") / "omarchy-remarkable"
 
 SETTINGS_FILE = CONFIG_DIR / "settings.json"
 RMAPI_CONFIG = CONFIG_DIR / "rmapi.conf"
@@ -75,9 +78,43 @@ DEFAULTS: dict[str, Any] = {
 }
 
 
+def private_dirs() -> tuple[Path, ...]:
+    """Everything under these holds private document data or credentials: the
+    search index and transcripts, downloaded documents, page images, names."""
+    return CONFIG_DIR, CACHE_DIR, DATA_DIR, RUNTIME_DIR
+
+
 def ensure_dirs() -> None:
-    for d in (CONFIG_DIR, CACHE_DIR, DATA_DIR, RUNTIME_DIR, DOC_CACHE, RENDER_CACHE, THUMB_CACHE, TMP_DIR):
-        d.mkdir(parents=True, exist_ok=True)
+    """Create the app's folders, owner-only. The helper also runs with umask
+    077 (cli.main), so what it writes inside is owner-only too."""
+    for d in private_dirs():
+        d.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if d.stat().st_mode & 0o077:
+            d.chmod(0o700)
+    for d in (DOC_CACHE, RENDER_CACHE, THUMB_CACHE, TMP_DIR):
+        d.mkdir(mode=0o700, parents=True, exist_ok=True)
+
+
+def tighten_private() -> int:
+    """Owner-only permissions for everything already under private_dirs(), for
+    files an older version wrote with the default umask. Symlinks (in the
+    Python environment) are left alone. Returns how many were changed."""
+    changed = 0
+    for root in private_dirs():
+        if not root.is_dir():
+            continue
+        for dirpath, dirnames, filenames in os.walk(root):
+            for name in dirnames + filenames:
+                path = os.path.join(dirpath, name)
+                try:
+                    st = os.lstat(path)
+                    if stat.S_ISLNK(st.st_mode) or not st.st_mode & 0o077:
+                        continue
+                    os.chmod(path, stat.S_IMODE(st.st_mode) & 0o700)
+                    changed += 1
+                except OSError:
+                    pass
+    return changed
 
 
 def load_settings() -> dict[str, Any]:

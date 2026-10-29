@@ -52,6 +52,7 @@ def test_ipp_command_keeps_job_titles_off_command_lines(monkeypatch):
     monkeypatch.setattr(printer, "ippeveprinter", lambda: "/usr/bin/ippeveprinter")
     cmd = printer.ipp_command(8631)
     assert "-c" not in cmd and "-k" in cmd
+    assert cmd[cmd.index("-n") + 1] == "localhost"  # loopback listeners only
 
 
 def test_ipp_request_and_response():
@@ -174,6 +175,17 @@ def test_install_needs_a_running_printer(monkeypatch):
 # ------------------------------------------------------------ integration
 
 
+def _lan_address() -> str | None:
+    """This machine's address on its default route (no packet is sent)."""
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        try:
+            s.connect(("192.0.2.1", 9))
+        except OSError:
+            return None
+        addr = s.getsockname()[0]
+    return None if addr.startswith("127.") else addr
+
+
 def _free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
@@ -202,6 +214,10 @@ def test_round_trip_dry_run(tmp_path):
                 break
             except OSError:
                 time.sleep(0.1)
+        lan = _lan_address()
+        if lan:  # nothing on the network can reach it
+            with pytest.raises(OSError):
+                socket.create_connection((lan, port), timeout=1).close()
         test = tmp_path / "named.test"
         test.write_text(Path("/usr/share/cups/ipptool/print-job.test").read_text().replace(
             "ATTR integer copies 1", 'ATTR integer copies 1\n\tATTR name job-name "Round Trip.pdf"'))

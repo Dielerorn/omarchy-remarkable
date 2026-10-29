@@ -25,7 +25,7 @@ from typing import Any, Callable
 
 from . import cloud, config
 
-VERSION = "0.1.3"
+VERSION = "0.1.4"
 TICK = 5
 
 
@@ -407,6 +407,7 @@ class Daemon:
         for sig in (signal.SIGTERM, signal.SIGHUP):
             signal.signal(sig, self._on_signal)
         _stop_orphan_printers()
+        config.tighten_private()  # files an older version wrote with the default umask
         self.emit("hello", version=VERSION, paired=cloud.is_paired(), pid=_pid())
         cached = cached_entries()
         if cached:

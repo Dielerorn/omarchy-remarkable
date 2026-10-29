@@ -6,6 +6,8 @@
 # bytecode in ~/.cache, never under the plugin directory: any write there
 # makes the Omarchy shell reload every plugin.
 set -euo pipefail
+# Owner-only files: the Python environment, caches, index and transcripts.
+umask 077
 
 self="$(readlink -f "${BASH_SOURCE[0]}")"
 plugin="$(cd "$(dirname "$self")/.." && pwd)"
@@ -24,7 +26,7 @@ if [[ ! -e "$stamp" ]]; then
     echo '{"ok": false, "error": "uv is not installed (omarchy pkg add uv)"}'
     exit 1
   fi
-  mkdir -p "$data"
+  mkdir -p -m 700 "$data"
   uv sync --project "$plugin/helper" --frozen --quiet >&2
   rm -f "$data"/venv/.synced-*
   touch "$stamp"

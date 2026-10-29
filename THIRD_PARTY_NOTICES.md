@@ -31,15 +31,14 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
-## Programs downloaded on first use
+## Program downloaded on first use
 
-Each is a pinned release, checked against a SHA-256 written in the source
-before it runs. They run as separate programs.
+A pinned release, checked against a SHA-256 written in the source before it
+runs. It runs as a separate program.
 
 | Program | Version | Licence | When |
 |---|---|---|---|
 | [rmapi](https://github.com/ddvk/rmapi) | v0.0.35 | AGPL-3.0 | First cloud access, unless `rmapi` is already on your PATH. Stored in `~/.local/share/omarchy-remarkable/bin`. |
-| [goMarkableStream](https://github.com/owulveryck/goMarkableStream) | v1.4.0 | MIT | Only when you start the live screen in developer mode. Copied to the tablet and run there while the stream is open. |
 
 ## Python libraries
 
@@ -66,7 +65,7 @@ These come from your system's packages and are used only when present:
 - `ippeveprinter` (cups) and the avahi daemon (avahi): the "reMarkable" printer.
 - `ssh` and `scp` (openssh): developer-mode features.
 - `zenity`: the file chooser.
-- `chromium` (or Chrome or Brave): the live-screen window, and web pages that only render in a browser.
+- `chromium` (or Chrome or Brave): web pages that only render in a browser.
 - `wl-copy` (wl-clipboard) and `xdg-open` (xdg-utils).
 - `claude` (Claude Code): handwriting to text, if you choose it.
 - `omarchy-calendar` ([omarchy-google-calendar](https://github.com/shivam-g10/omarchy-google-calendar)): calendar events on the agenda page.

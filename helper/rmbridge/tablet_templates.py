@@ -48,6 +48,35 @@ def template_dir() -> Path:
 # ============================================================ expressions
 
 
+# A .template is a tiny program: repeats of repeats can describe millions of
+# shapes in a few hundred bytes. Rendering has one shared budget.
+MAX_TEMPLATE_BYTES = 1024 * 1024  # .template file to import
+MAX_RENDER_STEPS = 200_000  # items and repeat tiles visited, in all
+MAX_RENDER_BYTES = 8 * 1024 * 1024  # SVG produced
+MAX_GROUP_DEPTH = 16  # groups inside groups
+
+
+class TemplateTooLarge(ValueError):
+    """Rendering would go past the budget. Never turned into a warning."""
+
+
+class _Budget:
+    def __init__(self) -> None:
+        self.steps = 0
+        self.bytes = 0
+
+    def step(self) -> None:
+        self.steps += 1
+        if self.steps > MAX_RENDER_STEPS:
+            raise TemplateTooLarge(f"the template repeats too much (more than {MAX_RENDER_STEPS:,} shapes)")
+
+    def emit(self, body: list[str], text: str) -> None:
+        self.bytes += len(text) + 1
+        if self.bytes > MAX_RENDER_BYTES:
+            raise TemplateTooLarge(f"the template draws more than {MAX_RENDER_BYTES >> 20} MB of shapes")
+        body.append(text)
+
+
 class ExprError(ValueError):
     pass
 
@@ -161,7 +190,10 @@ def evaluate(value: Any, names: dict[str, Any]) -> Any:
     if isinstance(value, bool) or isinstance(value, (int, float)):
         return value
     if isinstance(value, str):
-        return _Parser(value, names).parse()
+        try:
+            return _Parser(value, names).parse()
+        except RecursionError:
+            raise ExprError("expression nested too deeply") from None
     raise ExprError(f"can't evaluate {value!r}")
 
 
@@ -179,7 +211,8 @@ def template_to_svg(template: dict, *, width: int = SCREEN_W, height: int = SCRE
     page's top runs along the portrait right edge, matching how landscape
     notebook pages keep their strokes in portrait coordinates. (Unverified on
     a device: compare against an exported page when the tablet is reachable.)
-    Returns the SVG and a list of warnings for parts that were skipped.
+    Returns the SVG and a list of warnings for parts that were skipped;
+    raises TemplateTooLarge before going past the rendering budget.
     """
     landscape = str(template.get("orientation", "portrait")).lower() == "landscape"
     tw, th = (height, width) if landscape else (width, height)
@@ -194,8 +227,9 @@ def template_to_svg(template: dict, *, width: int = SCREEN_W, height: int = SCRE
             except (ExprError, TypeError, ZeroDivisionError) as e:
                 warnings.append(f"constant {key}: {e}")
     body: list[str] = []
+    budget = _Budget()
     for item in template.get("items") or []:
-        _render_item(item, names, 0.0, 0.0, tw, th, body, warnings)
+        _render_item(item, names, 0.0, 0.0, tw, th, body, warnings, budget, 0)
     transform = f' transform="translate({width} 0) rotate(90)"' if landscape else ""
     svg = (f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
            f'viewBox="0 0 {width} {height}">\n<rect width="{width}" height="{height}" fill="#ffffff"/>\n'
@@ -230,9 +264,12 @@ def _offsets(mode: Any, start: float, step: float, limit: float, names: dict) ->
 
 
 def _render_item(item: Any, names: dict, dx: float, dy: float, tw: float, th: float,
-                 body: list[str], warnings: list[str]) -> None:
+                 body: list[str], warnings: list[str], budget: _Budget, depth: int) -> None:
+    budget.step()
     if not isinstance(item, dict):
         return
+    if depth > MAX_GROUP_DEPTH:
+        raise TemplateTooLarge(f"groups are nested more than {MAX_GROUP_DEPTH} deep")
     kind = item.get("type")
     label = item.get("id") or kind
     try:
@@ -243,18 +280,20 @@ def _render_item(item: Any, names: dict, dx: float, dy: float, tw: float, th: fl
             w = num(box.get("width", tw), names)
             h = num(box.get("height", th), names)
             repeat = item.get("repeat") or {}
+            children = item.get("children") or []
             for oy in _offsets(repeat.get("rows"), y, h, th, names):
                 for ox in _offsets(repeat.get("columns"), x, w, tw, names):
-                    for child in item.get("children") or []:
-                        _render_item(child, names, x + ox, y + oy, tw, th, body, warnings)
+                    budget.step()
+                    for child in children:
+                        _render_item(child, names, x + ox, y + oy, tw, th, body, warnings, budget, depth + 1)
         elif kind == "path":
             d = _path_data(item.get("data") or [], names, dx, dy)
             if d:
                 stroke = item.get("strokeColor", "#000000")
                 fill = item.get("fillColor", "none")
                 width = num(item.get("strokeWidth", 1), names)
-                body.append(f'<path d="{d}" fill="{escape(str(fill))}" stroke="{escape(str(stroke))}" '
-                            f'stroke-width="{width:g}"/>')
+                budget.emit(body, f'<path d="{d}" fill="{escape(str(fill))}" stroke="{escape(str(stroke))}" '
+                                  f'stroke-width="{width:g}"/>')
         elif kind == "text":
             pos = item.get("position") or {}
             size = num(item.get("fontSize", 24), names)
@@ -262,10 +301,12 @@ def _render_item(item: Any, names: dict, dx: float, dy: float, tw: float, th: fl
             # Positions are the top of the text; SVG wants the baseline.
             y = num(pos.get("y", 0), names) + dy + size * 0.8
             color = item.get("color") or item.get("fillColor") or "#000000"
-            body.append(f'<text x="{x:g}" y="{y:g}" font-family="sans-serif" font-size="{size:g}" '
-                        f'fill="{escape(str(color))}">{escape(str(item.get("text", "")))}</text>')
+            budget.emit(body, f'<text x="{x:g}" y="{y:g}" font-family="sans-serif" font-size="{size:g}" '
+                              f'fill="{escape(str(color))}">{escape(str(item.get("text", "")))}</text>')
         else:
             warnings.append(f"{label}: unsupported item type {kind!r}")
+    except TemplateTooLarge:
+        raise
     except (ExprError, TypeError, ValueError, ZeroDivisionError) as e:
         warnings.append(f"{label}: {e}")
 
@@ -487,7 +528,11 @@ def prepare_install(src: Path, name: str, category: str, landscape: bool | None)
     files: dict[str, bytes] = {}
     notes: list[str] = []
     if suffix == ".template":
+        if src.stat().st_size > MAX_TEMPLATE_BYTES:
+            raise ValueError(f"{src.name} is larger than {MAX_TEMPLATE_BYTES >> 20} MB; that isn't a page template")
         doc = json.loads(src.read_text(encoding="utf-8"))
+        if not isinstance(doc, dict):
+            raise ValueError(f"{src.name} isn't a page template")
         is_land = str(doc.get("orientation", "portrait")).lower() == "landscape" if landscape is None else landscape
         files[f"{filename}.template"] = src.read_bytes()
         svg, warn = template_to_svg(doc)

@@ -47,8 +47,15 @@ class Busy(RuntimeError):
 
 
 def connect() -> sqlite3.Connection:
-    config.INDEX_DB.parent.mkdir(parents=True, exist_ok=True)
+    config.INDEX_DB.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     con = sqlite3.connect(config.INDEX_DB, timeout=30)
+    # SQLite gives the -wal/-shm files the database's own permissions.
+    for path in config.INDEX_DB.parent.glob(config.INDEX_DB.name + "*"):
+        try:
+            if path.stat().st_mode & 0o077:
+                path.chmod(0o600)
+        except OSError:
+            pass
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA journal_mode=WAL")  # searches keep working during an update
     con.executescript(SCHEMA)

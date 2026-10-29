@@ -157,7 +157,7 @@ Item {
             text: root.service && root.service.device ? "Battery " + Math.round(root.service.device.battery) + "%" : ""
           }
           StatusChip {
-            visible: !!(root.service && root.service.printer && root.service.printer.running)
+            visible: !!(root.service && root.service.printer && root.service.printer.ready)
             icon: G.printer
             text: "Printer ready"
           }

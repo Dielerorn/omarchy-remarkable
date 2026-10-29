@@ -309,6 +309,7 @@ def download(entry: Entry) -> Path:
         if not got:
             raise CloudError(f"download of {entry.name} produced no file")
         shutil.move(str(got[0]), target)
+        target.chmod(0o600)  # rmapi creates its output with the default umask
     for old in target.parent.glob("*.rmdoc"):
         if old != target:
             old.unlink(missing_ok=True)

@@ -179,6 +179,8 @@ def read_stdin_args() -> list[str] | None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Owner-only files: the index, transcripts and caches hold document text.
+    os.umask(0o077)
     config.ensure_dirs()
     argv = sys.argv[1:] if argv is None else argv
     if argv == [STDIN_ARGS]:

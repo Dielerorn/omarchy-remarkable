@@ -26,6 +26,8 @@ fi
 
 say "Stopping the shell…"
 timeout 60 quickshell kill -p "$shell_path" --any-display >/dev/null 2>&1 || true
+# Whatever happens next, don't leave the desktop without its bar.
+trap '[[ "$(omarchy-shell shell ping 2>/dev/null)" == "ok" ]] || hyprctl dispatch '"'"'hl.dsp.exec_cmd("omarchy-launch-shell")'"'"' >/dev/null' EXIT
 for _ in $(seq 60); do
   pgrep -f "^quickshell -n -p $shell_path" >/dev/null || break
   sleep 1

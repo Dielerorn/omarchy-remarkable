@@ -140,12 +140,62 @@ Flickable {
     }
 
     Card {
+      id: printerCard
       title: "Print to reMarkable"
       icon: G.printer
-      subtitle: root.service && root.service.printer && root.service.printer.running
+      readonly property var pr: root.service && root.service.printer ? root.service.printer : ({})
+      property string adminCommand: ""  // when CUPS wants an administrator to add the printer
+      subtitle: pr.ready
         ? "Ready. Choose “reMarkable” in any app's print dialog and the pages arrive on the tablet."
-        : "A printer called “reMarkable” that sends whatever you print to the tablet. It runs as your user — nothing system-wide."
+        : pr.running
+          ? "Running. Add it to print dialogs once (this adds a CUPS printer that only programs on this computer can use)."
+          : "A printer called “reMarkable” that sends whatever you print to the tablet. It runs as your user and only programs on this computer can reach it."
       SettingToggle { service: root.service; key: "printerEnabled"; label: "Offer the reMarkable printer" }
+      ActionRow {
+        visible: !!printerCard.pr.running
+        title: printerCard.pr.queue ? "In print dialogs" : "Not in print dialogs yet"
+        description: printerCard.pr.queue && !printerCard.pr.queueMatches
+          ? "The CUPS printer points at another port; add it again to fix it."
+          : "Adds a CUPS printer for it with lpadmin. Only programs on this computer can print to it."
+        Button {
+          text: printerCard.pr.queue && printerCard.pr.queueMatches ? "Remove from print dialogs" : "Add to print dialogs"
+          iconText: G.printer
+          bordered: true
+          iconSpinning: root.busy("printer-queue")
+          onClicked: {
+            var on = printerCard.pr.queue && printerCard.pr.queueMatches
+            root.service.act(["printer", on ? "remove" : "install"], "printer-queue",
+                             on ? "Removed from print dialogs" : "“reMarkable” is in your print dialogs",
+                             function (r) {
+                               printerCard.adminCommand = !r.ok && r.command ? r.command : ""
+                               root.service.tell("status")
+                             })
+          }
+        }
+      }
+      ColumnLayout {
+        visible: printerCard.adminCommand !== ""
+        Layout.fillWidth: true
+        spacing: Style.spacing.xs
+        Text {
+          Layout.fillWidth: true
+          text: "CUPS wants an administrator for this. Run it in a terminal (it asks for your password):"
+          color: root.muted
+          font.family: Style.font.family
+          font.pixelSize: Style.font.caption
+          wrapMode: Text.WordWrap
+        }
+        TextEdit {
+          Layout.fillWidth: true
+          text: printerCard.adminCommand
+          readOnly: true
+          selectByMouse: true
+          wrapMode: TextEdit.WrapAnywhere
+          color: Commons.Color.foreground
+          font.family: Style.font.family
+          font.pixelSize: Style.font.caption
+        }
+      }
       SettingText { service: root.service; key: "printFolder"; label: "Tablet folder for printed documents" }
       Text {
         visible: !!(root.service && root.service.printer && root.service.printer.error)

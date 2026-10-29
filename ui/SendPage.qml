@@ -230,7 +230,7 @@ Flickable {
     Card {
       title: "From anywhere"
       icon: G.terminal
-      subtitle: "“Send to reMarkable” appears in your file manager's Open With menu. From a terminal:"
+      subtitle: "Add “Send to reMarkable” to your file manager's Open With menu under Settings → Desktop. From a terminal:"
       Text {
         Layout.fillWidth: true
         text: "omarchy-remarkable send report.pdf notes.md photo.jpg\nomarchy-remarkable web https://example.com/article\nomarchy-remarkable agenda send"

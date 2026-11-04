@@ -179,7 +179,7 @@ Flickable {
         spacing: Style.spacing.xs
         Text {
           Layout.fillWidth: true
-          text: "CUPS wants an administrator for this. Run it in a terminal (it asks for your password):"
+          text: "CUPS only lets root add printers here. Run this as root in a terminal, once:"
           color: root.muted
           font.family: Style.font.family
           font.pixelSize: Style.font.caption

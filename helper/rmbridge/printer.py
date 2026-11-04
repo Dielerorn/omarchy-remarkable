@@ -660,7 +660,8 @@ def _lpadmin(cmd: list[str]) -> dict:
     detail = (proc.stderr or proc.stdout).strip().splitlines()
     message = detail[-1] if detail else f"lpadmin exited {proc.returncode}"
     if re.search(r"forbidden|unauthori[sz]ed|password|not allowed|permission", message, re.I):
-        message = "CUPS wants an administrator to change printers; run the command below in a terminal"
+        # Omarchy's CUPS lets only root and its SystemGroup (not wheel) change printers.
+        message = "CUPS only lets root add printers here; run the command below as root in a terminal"
     return {"ok": False, "error": message, "command": shlex.join(cmd), "code": "printer"}
 
 

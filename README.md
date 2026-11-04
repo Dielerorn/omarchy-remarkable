@@ -97,8 +97,8 @@ Then:
    own SSH key and doesn't keep the password.
 3. Optional: **Send** → **Print to reMarkable** → **Add to print dialogs**. This adds
    a CUPS printer pointing at the plugin's own printer on this computer, using
-   `lpadmin`. If CUPS wants an administrator for that, the page shows the exact
-   command to run in a terminal; it asks for your password once.
+   `lpadmin`. Omarchy's CUPS lets only root add printers, so the page then shows
+   the exact command to run as root in a terminal, once.
 4. Optional: under Settings → Desktop, add "Send to reMarkable" to Open With menus and
    put the `omarchy-remarkable` command on your PATH.
 

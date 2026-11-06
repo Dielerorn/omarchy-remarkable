@@ -222,6 +222,13 @@ tablet until you delete it or reset the tablet. It's the line ending in
     decompression, and gives up on servers that send too slowly. Images are
     checked for their declared size, then decoded in a separate process with
     its own memory and CPU limits.
+  - Templates and sleep screens you add in developer mode are checked before
+    the confirmation step. A `.template` file is drawn under one budget that
+    counts from its first constant: how many shapes it draws, how much SVG it
+    produces, how deeply it nests, and how much its expressions compute.
+    Its numbers are plain doubles, as on the tablet, so no value grows with
+    the arithmetic. Images (PNG, JPEG, SVG and so on) are drawn in the same
+    limited process as web images, with a 30-second limit.
   - The printer is CUPS's own `ippeveprinter`, running as your user and listening
     on localhost only. It still announces itself on the network over DNS-SD, because
     ippeveprinter won't run without that, but it refuses connections from other

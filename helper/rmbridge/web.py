@@ -594,6 +594,30 @@ def _limit_decoder(memory: int, cpu_seconds: int) -> None:
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
 
 
+def decoder_process(memory: int = DECODE_MEMORY, cpu_seconds: int = DECODE_CPU_SECONDS,
+                    mode: str | None = None) -> subprocess.Popen:
+    """`python -m rmbridge.imagedecode [mode]` with its memory and CPU limits
+    set before it runs. Requests go on stdin, never on the command line."""
+    helper = str(Path(__file__).resolve().parents[1])
+    env = dict(os.environ, PYTHONPATH=helper + os.pathsep + os.environ.get("PYTHONPATH", ""))
+    return subprocess.Popen([sys.executable, "-m", "rmbridge.imagedecode", *([mode] if mode else [])],
+                            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env,
+                            preexec_fn=lambda: _limit_decoder(memory, cpu_seconds))
+
+
+def run_limited(mode: str, request: bytes, timeout: float | None = None) -> bytes | None:
+    """One request to the decoder process in another mode; its output, or None
+    if it died (out of memory or CPU) or ran past the timeout (DECODE_TIMEOUT)."""
+    proc = decoder_process(mode=mode)
+    try:
+        out, _ = proc.communicate(request, timeout=DECODE_TIMEOUT if timeout is None else timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.communicate()
+        return None
+    return out if proc.returncode == 0 else None
+
+
 class ImageDecoder:
     """prepare_image() in a child process (rmbridge.imagedecode) with capped
     memory and CPU, so a hostile image fails that process instead of the
@@ -613,12 +637,7 @@ class ImageDecoder:
         self.close()
 
     def _start(self) -> subprocess.Popen:
-        helper = str(Path(__file__).resolve().parents[1])
-        env = dict(os.environ, PYTHONPATH=helper + os.pathsep + os.environ.get("PYTHONPATH", ""))
-        memory, cpu = self.limits
-        return subprocess.Popen([sys.executable, "-m", "rmbridge.imagedecode"], stdin=subprocess.PIPE,
-                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env,
-                                preexec_fn=lambda: _limit_decoder(memory, cpu))
+        return decoder_process(*self.limits)
 
     def _read(self, n: int, deadline: float) -> bytes | None:
         import select

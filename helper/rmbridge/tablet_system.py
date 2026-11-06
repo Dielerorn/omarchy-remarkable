@@ -191,14 +191,31 @@ MAX_IMPORT_BYTES = 50 * 1024 * 1024  # an image or PDF to use as a template or s
 def fit_png(src: Path, width: int = SCREEN_W, height: int = SCREEN_H) -> tuple[bytes, dict]:
     """The image as a PNG of exactly width x height, letterboxed on white.
 
-    Returns the bytes and what was done, so the caller can say so.
+    The file size and declared pixels are checked here. Decoding and drawing
+    happen in the decoder process (web.decoder_process), with its memory, CPU
+    and time limits, because an SVG or a compressed image can cost far more
+    than its file size suggests. Returns the bytes and what was done, so the
+    caller can say so.
     """
-    from .web import MAX_IMAGE_PIXELS, declared_size, too_many_pixels
+    from .web import MAX_IMAGE_PIXELS, declared_size, run_limited, too_many_pixels
     if src.stat().st_size > MAX_IMPORT_BYTES:
         raise ValueError(f"{src.name} is larger than {MAX_IMPORT_BYTES >> 20} MB")
     with open(src, "rb") as f:
         if too_many_pixels(declared_size(f.read(256 * 1024))):
             raise ValueError(f"{src.name} is larger than {MAX_IMAGE_PIXELS // 1_000_000} megapixels")
+    request = json.dumps({"path": str(src.resolve()), "width": width, "height": height}).encode() + b"\n"
+    out = run_limited("fit", request)
+    if not out:
+        raise ValueError(f"{src.name} needs more memory or time to draw than a page image should")
+    head, _, data = out.partition(b"\n")
+    result = json.loads(head)
+    if not result.get("ok"):
+        raise ValueError(result.get("error") or f"can't read {src.name} as an image")
+    return data, result["info"]
+
+
+def fit_png_here(src: Path, width: int, height: int) -> tuple[bytes, dict]:
+    """fit_png's drawing, run inside the decoder process."""
     import pymupdf
 
     try:

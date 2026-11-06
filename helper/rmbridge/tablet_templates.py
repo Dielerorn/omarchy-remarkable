@@ -28,8 +28,9 @@ from xml.sax.saxutils import escape
 
 from . import config
 from .tablet_remote import REMOTE_BACKUP, Remote, TabletError, q
-from .tablet_system import (FIRMWARE_WARNING, SCREEN_H, SCREEN_W, Change, apply, backup_originals,
-                            firmware, fit_png, original, remember)
+from .tablet_system import (FIRMWARE_WARNING, MAX_IMPORT_BYTES, SCREEN_H, SCREEN_W, Change, apply,
+                            backup_originals, firmware, fit_png, original, remember)
+from .web import declared_size
 
 TEMPLATES_DIR = "/usr/share/remarkable/templates"
 REGISTRIES = ["templates.json", "ferrari-templates.json"]
@@ -49,11 +50,18 @@ def template_dir() -> Path:
 
 
 # A .template is a tiny program: repeats of repeats can describe millions of
-# shapes in a few hundred bytes. Rendering has one shared budget.
+# shapes in a few hundred bytes, and constants can build on each other. One
+# budget covers everything a render does, from the first constant on, and
+# numbers are IEEE doubles like on the tablet, so no value grows with the
+# arithmetic done on it.
 MAX_TEMPLATE_BYTES = 1024 * 1024  # .template file to import
 MAX_RENDER_STEPS = 200_000  # items and repeat tiles visited, in all
 MAX_RENDER_BYTES = 8 * 1024 * 1024  # SVG produced
 MAX_GROUP_DEPTH = 16  # groups inside groups
+MAX_EVAL_WORK = 2_000_000  # values looked up plus expression tokens read, in all
+MAX_EXPR_CHARS = 4096  # one expression
+MAX_WARNINGS = 50  # kept per render; the rest are only counted
+MAX_WARNING_CHARS = 200
 
 
 class TemplateTooLarge(ValueError):
@@ -64,6 +72,7 @@ class _Budget:
     def __init__(self) -> None:
         self.steps = 0
         self.bytes = 0
+        self.work = 0
 
     def step(self) -> None:
         self.steps += 1
@@ -76,9 +85,37 @@ class _Budget:
             raise TemplateTooLarge(f"the template draws more than {MAX_RENDER_BYTES >> 20} MB of shapes")
         body.append(text)
 
+    def charge(self, units: int = 1) -> None:
+        self.work += units
+        if self.work > MAX_EVAL_WORK:
+            raise TemplateTooLarge(f"the template's expressions take too much work (more than {MAX_EVAL_WORK:,} steps)")
+
 
 class ExprError(ValueError):
     pass
+
+
+def _brief(value: Any, limit: int = 60) -> str:
+    """A label for messages, without formatting an arbitrarily large value."""
+    if isinstance(value, str):
+        text = value
+    elif value is None or isinstance(value, (bool, int, float)):
+        text = repr(value)
+    else:
+        text = f"a {type(value).__name__}"
+    return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
+def _finite(value: Any) -> float:
+    """A number as a finite double. Doubles take the same small time and
+    memory whatever the arithmetic, unlike Python's unbounded integers."""
+    try:
+        out = float(value)
+    except OverflowError:
+        raise ExprError("number too large") from None
+    if not math.isfinite(out):
+        raise ExprError("number too large")
+    return out
 
 
 _TOKEN = re.compile(r"\s*(?:(\d+\.?\d*(?:[eE][-+]?\d+)?|\.\d+)|([A-Za-z_][A-Za-z_0-9]*)|"
@@ -91,7 +128,7 @@ def _tokens(text: str) -> list[str]:
     while pos < len(text):
         m = _TOKEN.match(text, pos)
         if not m or m.end() == pos:
-            raise ExprError(f"can't read {text!r}")
+            raise ExprError(f"can't read {_brief(text)!r}")
         out.append(m.group(0).strip())
         pos = m.end()
     return out
@@ -118,7 +155,7 @@ class _Parser:
     def parse(self) -> Any:
         value = self.ternary()
         if self.peek() is not None:
-            raise ExprError(f"unexpected {self.peek()!r}")
+            raise ExprError(f"unexpected {_brief(self.peek())!r}")
         return value
 
     def ternary(self) -> Any:
@@ -148,7 +185,7 @@ class _Parser:
         if tok in ("-", "+", "!"):
             self.take()
             v = self.unary()
-            return -v if tok == "-" else (+v if tok == "+" else not v)
+            return not v if tok == "!" else (-float(v) if tok == "-" else float(v))
         return self.atom()
 
     def atom(self) -> Any:
@@ -158,27 +195,31 @@ class _Parser:
             self.take(")")
             return v
         if tok[0].isdigit() or tok[0] == ".":
-            return float(tok) if any(c in tok for c in ".eE") else int(tok)
+            return float(tok)  # "1e999" is inf; evaluate() refuses it at the end
         if tok in ("true", "false"):
             return tok == "true"
         if tok[0].isalpha() or tok[0] == "_":
             if tok not in self.names:
-                raise ExprError(f"unknown name {tok}")
+                raise ExprError(f"unknown name {_brief(tok)}")
             return self.names[tok]
-        raise ExprError(f"unexpected {tok!r}")
+        raise ExprError(f"unexpected {_brief(tok)!r}")
+
+
+_ARITHMETIC = {"+", "-", "*", "/", "%"}
 
 
 def _apply(op: str, a: Any, b: Any) -> Any:
-    if op == "+":
-        return a + b
-    if op == "-":
-        return a - b
-    if op == "*":
-        return a * b
-    if op == "/":
-        return a / b if b else 0.0
-    if op == "%":
-        return math.fmod(a, b) if b else 0.0
+    if op in _ARITHMETIC:
+        a, b = float(a), float(b)
+        if op == "+":
+            return a + b
+        if op == "-":
+            return a - b
+        if op == "*":
+            return a * b
+        if op == "/":
+            return a / b if b else 0.0
+        return math.fmod(a, b) if b and math.isfinite(a) else 0.0
     if op == "&&":
         return bool(a) and bool(b)
     if op == "||":
@@ -186,19 +227,72 @@ def _apply(op: str, a: Any, b: Any) -> Any:
     return {"==": a == b, "!=": a != b, "<": a < b, "<=": a <= b, ">": a > b, ">=": a >= b}[op]
 
 
-def evaluate(value: Any, names: dict[str, Any]) -> Any:
-    if isinstance(value, bool) or isinstance(value, (int, float)):
+def evaluate(value: Any, names: dict[str, Any], budget: _Budget | None = None) -> Any:
+    """A number, true/false, or an expression over names, as a finite double
+    or a bool. With a budget, each token read is charged to it."""
+    if isinstance(value, bool):
         return value
-    if isinstance(value, str):
-        try:
-            return _Parser(value, names).parse()
-        except RecursionError:
-            raise ExprError("expression nested too deeply") from None
-    raise ExprError(f"can't evaluate {value!r}")
+    if isinstance(value, (int, float)):
+        return _finite(value)
+    if not isinstance(value, str):
+        raise ExprError(f"can't evaluate {_brief(value)}")
+    if len(value) > MAX_EXPR_CHARS:
+        raise ExprError(f"expression longer than {MAX_EXPR_CHARS:,} characters")
+    parser = _Parser(value, names)
+    if budget is not None:
+        budget.charge(len(parser.toks))
+    try:
+        result = parser.parse()
+    except RecursionError:
+        raise ExprError("expression nested too deeply") from None
+    return result if isinstance(result, bool) else _finite(result)
 
 
-def num(value: Any, names: dict[str, Any]) -> float:
-    return float(evaluate(value, names))
+class _Scope:
+    """What one render evaluates against: the names, the budget and the
+    warnings. Once the constants are set the names stay fixed, so each
+    distinct expression is worked out once and remembered."""
+
+    def __init__(self, names: dict[str, Any]) -> None:
+        self.names = names
+        self.budget = _Budget()
+        self.warnings: list[str] = []
+        self.unlisted = 0
+        self.known: dict[str, tuple[Any, str | None]] | None = None
+
+    def freeze(self) -> None:
+        self.known = {}
+
+    def value(self, value: Any) -> Any:
+        self.budget.charge()
+        if self.known is None or not isinstance(value, str):
+            return evaluate(value, self.names, self.budget)
+        if value not in self.known:
+            try:
+                self.known[value] = (evaluate(value, self.names, self.budget), None)
+            except ExprError as e:
+                self.known[value] = (None, str(e)[:MAX_WARNING_CHARS])
+        result, error = self.known[value]
+        if error is not None:
+            raise ExprError(error)
+        return result
+
+    def num(self, value: Any) -> float:
+        return float(self.value(value))
+
+    def warn(self, text: str) -> None:
+        if len(self.warnings) >= MAX_WARNINGS:
+            self.unlisted += 1
+        else:
+            self.warnings.append(text if len(text) <= MAX_WARNING_CHARS else text[:MAX_WARNING_CHARS - 1] + "…")
+
+
+def _dict(value: Any) -> dict:
+    return value if isinstance(value, dict) else {}
+
+
+def _list(value: Any) -> list:
+    return value if isinstance(value, list) else []
 
 
 # ============================================================ .template -> SVG
@@ -212,43 +306,46 @@ def template_to_svg(template: dict, *, width: int = SCREEN_W, height: int = SCRE
     notebook pages keep their strokes in portrait coordinates. (Unverified on
     a device: compare against an exported page when the tablet is reachable.)
     Returns the SVG and a list of warnings for parts that were skipped;
-    raises TemplateTooLarge before going past the rendering budget.
+    raises TemplateTooLarge before going past the budget, which starts with
+    the constants.
     """
-    landscape = str(template.get("orientation", "portrait")).lower() == "landscape"
+    landscape = _brief(template.get("orientation", "portrait")).lower() == "landscape"
     tw, th = (height, width) if landscape else (width, height)
-    names: dict[str, Any] = {"templateWidth": tw, "templateHeight": th, "paperOriginX": 0, "paperOriginY": 0}
-    warnings: list[str] = []
-    for const in template.get("constants") or []:
-        if not isinstance(const, dict):
-            continue
-        for key, value in const.items():
+    scope = _Scope({"templateWidth": float(tw), "templateHeight": float(th),
+                    "paperOriginX": 0.0, "paperOriginY": 0.0})
+    for const in _list(template.get("constants")):
+        for key, value in _dict(const).items():
             try:
-                names[key] = evaluate(value, names)
-            except (ExprError, TypeError, ZeroDivisionError) as e:
-                warnings.append(f"constant {key}: {e}")
+                scope.names[key] = scope.value(value)
+            except ExprError as e:
+                scope.warn(f"constant {_brief(key)}: {e}")
+    scope.freeze()
     body: list[str] = []
-    budget = _Budget()
-    for item in template.get("items") or []:
-        _render_item(item, names, 0.0, 0.0, tw, th, body, warnings, budget, 0)
+    for item in _list(template.get("items")):
+        _render_item(item, scope, 0.0, 0.0, tw, th, body, 0)
+    if scope.unlisted:
+        scope.warnings.append(f"and {scope.unlisted:,} more")
     transform = f' transform="translate({width} 0) rotate(90)"' if landscape else ""
     svg = (f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
            f'viewBox="0 0 {width} {height}">\n<rect width="{width}" height="{height}" fill="#ffffff"/>\n'
            f'<g{transform}>\n' + "\n".join(body) + "\n</g>\n</svg>\n")
-    return svg, warnings
+    return svg, scope.warnings
 
 
-def _offsets(mode: Any, start: float, step: float, limit: float, names: dict) -> list[float]:
+DIRECTIONS = ("down", "up", "right", "left", "infinite")
+
+
+def _offsets(mode: Any, start: float, step: float, limit: float, scope: _Scope) -> list[float]:
     """Tile offsets for a group's repeat value ("down"/"right", "up"/"left", "infinite", or a count)."""
     if mode in (None, "", False, 0) or step <= 0:
         return [0.0]
     cap = 2000
-    if isinstance(mode, str) and mode not in ("down", "up", "right", "left", "infinite"):
+    if not (isinstance(mode, str) and mode in DIRECTIONS):
         try:
-            mode = int(evaluate(mode, names))
-        except (ExprError, TypeError, ValueError):
+            count = scope.num(mode)
+        except ExprError:
             return [0.0]
-    if isinstance(mode, (int, float)) and not isinstance(mode, bool):
-        return [k * step for k in range(max(1, min(int(mode), cap)))]
+        return [k * step for k in range(max(1, min(int(count), cap)))]
     out: list[float] = []
     if mode in ("down", "right", "infinite"):
         k = 0
@@ -263,66 +360,71 @@ def _offsets(mode: Any, start: float, step: float, limit: float, names: dict) ->
     return out or [0.0]
 
 
-def _render_item(item: Any, names: dict, dx: float, dy: float, tw: float, th: float,
-                 body: list[str], warnings: list[str], budget: _Budget, depth: int) -> None:
+def _render_item(item: Any, scope: _Scope, dx: float, dy: float, tw: float, th: float,
+                 body: list[str], depth: int) -> None:
+    budget = scope.budget
     budget.step()
     if not isinstance(item, dict):
         return
     if depth > MAX_GROUP_DEPTH:
         raise TemplateTooLarge(f"groups are nested more than {MAX_GROUP_DEPTH} deep")
     kind = item.get("type")
-    label = item.get("id") or kind
+    label = _brief(item.get("id") or kind)
     try:
         if kind == "group":
-            box = item.get("boundingBox") or {}
-            x = num(box.get("x", 0), names) + dx
-            y = num(box.get("y", 0), names) + dy
-            w = num(box.get("width", tw), names)
-            h = num(box.get("height", th), names)
-            repeat = item.get("repeat") or {}
-            children = item.get("children") or []
-            for oy in _offsets(repeat.get("rows"), y, h, th, names):
-                for ox in _offsets(repeat.get("columns"), x, w, tw, names):
+            box = _dict(item.get("boundingBox"))
+            x = scope.num(box.get("x", 0)) + dx
+            y = scope.num(box.get("y", 0)) + dy
+            w = scope.num(box.get("width", tw))
+            h = scope.num(box.get("height", th))
+            repeat = _dict(item.get("repeat"))
+            children = _list(item.get("children"))
+            columns = _offsets(repeat.get("columns"), x, w, tw, scope)
+            for oy in _offsets(repeat.get("rows"), y, h, th, scope):
+                for ox in columns:
                     budget.step()
                     for child in children:
-                        _render_item(child, names, x + ox, y + oy, tw, th, body, warnings, budget, depth + 1)
+                        _render_item(child, scope, x + ox, y + oy, tw, th, body, depth + 1)
         elif kind == "path":
-            d = _path_data(item.get("data") or [], names, dx, dy)
+            d = _path_data(_list(item.get("data")), scope, dx, dy)
             if d:
                 stroke = item.get("strokeColor", "#000000")
                 fill = item.get("fillColor", "none")
-                width = num(item.get("strokeWidth", 1), names)
-                budget.emit(body, f'<path d="{d}" fill="{escape(str(fill))}" stroke="{escape(str(stroke))}" '
+                width = scope.num(item.get("strokeWidth", 1))
+                budget.emit(body, f'<path d="{d}" fill="{escape(_brief(fill))}" stroke="{escape(_brief(stroke))}" '
                                   f'stroke-width="{width:g}"/>')
         elif kind == "text":
-            pos = item.get("position") or {}
-            size = num(item.get("fontSize", 24), names)
-            x = num(pos.get("x", 0), names) + dx
+            pos = _dict(item.get("position"))
+            size = scope.num(item.get("fontSize", 24))
+            x = scope.num(pos.get("x", 0)) + dx
             # Positions are the top of the text; SVG wants the baseline.
-            y = num(pos.get("y", 0), names) + dy + size * 0.8
+            y = scope.num(pos.get("y", 0)) + dy + size * 0.8
             color = item.get("color") or item.get("fillColor") or "#000000"
+            text = item.get("text", "")
             budget.emit(body, f'<text x="{x:g}" y="{y:g}" font-family="sans-serif" font-size="{size:g}" '
-                              f'fill="{escape(str(color))}">{escape(str(item.get("text", "")))}</text>')
+                              f'fill="{escape(_brief(color))}">'
+                              f'{escape(text if isinstance(text, str) else _brief(text))}</text>')
         else:
-            warnings.append(f"{label}: unsupported item type {kind!r}")
+            scope.warn(f"{label}: unsupported item type {_brief(kind)!r}")
     except TemplateTooLarge:
         raise
     except (ExprError, TypeError, ValueError, ZeroDivisionError) as e:
-        warnings.append(f"{label}: {e}")
+        scope.warn(f"{label}: {e}")
 
 
 _ARITY = {"M": 2, "L": 2, "C": 6, "Q": 4, "H": 1, "V": 1, "Z": 0}
 
 
-def _path_data(data: list, names: dict, dx: float, dy: float) -> str:
+def _path_data(data: list, scope: _Scope, dx: float, dy: float) -> str:
     out: list[str] = []
     i = 0
     while i < len(data):
         cmd = data[i]
-        if not isinstance(cmd, str) or cmd.upper() not in _ARITY:
-            raise ExprError(f"unknown path command {cmd!r}")
+        scope.budget.charge()
+        if not isinstance(cmd, str) or len(cmd) != 1 or cmd.upper() not in _ARITY:
+            raise ExprError(f"unknown path command {_brief(cmd)!r}")
         n = _ARITY[cmd.upper()]
-        args = [num(v, names) for v in data[i + 1:i + 1 + n]]
+        args = [scope.num(v) for v in data[i + 1:i + 1 + n]]
         if len(args) < n:
             raise ExprError(f"path command {cmd} is missing values")
         i += 1 + n
@@ -335,6 +437,28 @@ def _path_data(data: list, names: dict, dx: float, dy: float) -> str:
                 args = [a + (dx if k % 2 == 0 else dy) for k, a in enumerate(args)]
         out.append(cmd + " ".join(f"{a:g}" for a in args))
     return " ".join(out)
+
+
+def read_limited(path: Path, limit: int, what: str) -> bytes:
+    """A file's bytes, refusing it if it's over limit, without reading more than that."""
+    with open(path, "rb") as f:
+        raw = f.read(limit + 1)
+    if len(raw) > limit:
+        raise ValueError(f"{path.name} is larger than {limit >> 20} MB; that isn't {what}")
+    return raw
+
+
+def parse_template(raw: bytes, name: str) -> dict:
+    """A .template file's JSON, refusing one too large or too nested to be a page template."""
+    if len(raw) > MAX_TEMPLATE_BYTES:
+        raise ValueError(f"{name} is larger than {MAX_TEMPLATE_BYTES >> 20} MB; that isn't a page template")
+    try:
+        doc = json.loads(raw.decode("utf-8"))
+    except RecursionError:
+        raise ValueError(f"{name} is nested too deeply to be a page template") from None
+    if not isinstance(doc, dict):
+        raise ValueError(f"{name} isn't a page template")
+    return doc
 
 
 # ============================================================ registry
@@ -415,9 +539,9 @@ def fetch(remote: Remote) -> dict:
             if svg.name in files:
                 continue
             try:
-                doc = json.loads(tpl.read_text(encoding="utf-8"))
-                text, warn = template_to_svg(doc)
-            except (ValueError, UnicodeDecodeError) as e:
+                raw = read_limited(tpl, MAX_TEMPLATE_BYTES, "a page template")
+                text, warn = template_to_svg(parse_template(raw, tpl.name))
+            except ValueError as e:  # includes UnicodeDecodeError and TemplateTooLarge
                 skipped.append({"file": tpl.name, "reason": f"not a readable template ({e})"})
                 continue
             svg.write_text(text, encoding="utf-8")
@@ -528,18 +652,15 @@ def prepare_install(src: Path, name: str, category: str, landscape: bool | None)
     files: dict[str, bytes] = {}
     notes: list[str] = []
     if suffix == ".template":
-        if src.stat().st_size > MAX_TEMPLATE_BYTES:
-            raise ValueError(f"{src.name} is larger than {MAX_TEMPLATE_BYTES >> 20} MB; that isn't a page template")
-        doc = json.loads(src.read_text(encoding="utf-8"))
-        if not isinstance(doc, dict):
-            raise ValueError(f"{src.name} isn't a page template")
-        is_land = str(doc.get("orientation", "portrait")).lower() == "landscape" if landscape is None else landscape
-        files[f"{filename}.template"] = src.read_bytes()
+        raw = read_limited(src, MAX_TEMPLATE_BYTES, "a page template")
+        doc = parse_template(raw, src.name)  # the bytes checked are the bytes installed
+        is_land = _brief(doc.get("orientation", "portrait")).lower() == "landscape" if landscape is None else landscape
+        files[f"{filename}.template"] = raw
         svg, warn = template_to_svg(doc)
         preview_svg = svg
         notes += warn[:5]
     elif suffix == ".svg":
-        text = src.read_text(encoding="utf-8", errors="replace")
+        text = read_limited(src, MAX_IMPORT_BYTES, "a page template").decode("utf-8", errors="replace")
         size = svg_size(text)
         is_land = (size[0] > size[1]) if (landscape is None and size) else bool(landscape)
         w, h = (SCREEN_H, SCREEN_W) if is_land else (SCREEN_W, SCREEN_H)
@@ -556,13 +677,16 @@ def prepare_install(src: Path, name: str, category: str, landscape: bool | None)
         finally:
             Path(tmp.name).unlink(missing_ok=True)
     elif suffix == ".png":
-        import pymupdf
-        pix = pymupdf.Pixmap(str(src))
-        is_land = (pix.width > pix.height) if landscape is None else landscape
+        # The header gives the orientation; fit_png checks the size and decodes it in a limited process.
+        with open(src, "rb") as f:
+            declared = declared_size(f.read(64))
+        if declared is None:
+            raise ValueError(f"{src.name} isn't a PNG")
+        is_land = (declared[0] > declared[1]) if landscape is None else landscape
         w, h = (SCREEN_H, SCREEN_W) if is_land else (SCREEN_W, SCREEN_H)
         files[f"{filename}.png"], info = fit_png(src, w, h)
         if info.get("converted"):
-            notes.append(f"resized the PNG from {pix.width}×{pix.height} to {w}×{h}")
+            notes.append(f"resized the PNG from {declared[0]}×{declared[1]} to {w}×{h}")
         preview_svg = None
     else:
         raise ValueError("templates must be .svg, .png or .template files")

@@ -60,166 +60,188 @@ Panel {
     onPressed: function (b) { root.toggle() }
   }
 
+  property bool popoutBuilt: false
+
   KeyboardPanel {
     id: popup
     anchorItem: button
     bar: root.bar
     owner: root
     open: root.opened
-    focusTarget: keyCatcher
+    focusTarget: popoutLoader.item
     contentWidth: popup.fittedContentWidth(Style.space(root.panelWidth))
     contentHeight: Math.round(Math.min(
-      Math.max(popup.verticalContentInset, content.implicitHeight + popup.verticalContentInset),
+      Math.max(popup.verticalContentInset, (popoutLoader.item ? popoutLoader.item.implicitHeight : 0) + popup.verticalContentInset),
       popup.availableCardHeight))
 
-    PanelKeyCatcher {
-      id: keyCatcher
+    // Built the first time the popout opens instead of at shell start. The
+    // bar mounts this widget once per monitor, and an always-built tree
+    // re-evaluates all of its bindings on every theme switch (and asks for
+    // the recent thumbnails) while nobody is looking at it. Once built it
+    // stays, so a reopen is instant. A Loader rather than
+    // KeyboardPanel.content, which only exists on Omarchy 4.5+.
+    Loader {
+      id: popoutLoader
       anchors.fill: parent
-      onCloseRequested: root.close()
-      onTabRequested: function (direction) { root.switchPanel(direction) }
+      active: root.opened || root.popoutBuilt
+      onLoaded: {
+        root.popoutBuilt = true
+        // KeyboardPanel focuses its target as it opens, which on the first
+        // open is before this item exists.
+        Qt.callLater(function () {
+          if (root.opened && popoutLoader.item) popoutLoader.item.forceActiveFocus()
+        })
+      }
+      sourceComponent: PanelKeyCatcher {
+        id: keyCatcher
+        implicitHeight: content.implicitHeight
+        anchors.fill: parent
+        onCloseRequested: root.close()
+        onTabRequested: function (direction) { root.switchPanel(direction) }
 
-      Column {
-        id: content
-        width: parent.width
-        spacing: Style.spacing.md
-
-        PanelHero {
+        Column {
+          id: content
           width: parent.width
-          title: "reMarkable"
-          meta: root.statusText()
-          foreground: root.panelForeground
-          fontFamily: root.fontFamily
-          iconComponent: Component {
-            Text {
-              text: G.tablet
-              color: Commons.Color.accent
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.display
-            }
-          }
-          trailingControl: Component {
-            PanelActionButton {
-              iconText: G.refresh
-              tooltipText: "Check the cloud now"
-              foreground: root.panelForeground
-              onClicked: if (root.service) root.service.refresh()
-            }
-          }
-        }
+          spacing: Style.spacing.md
 
-        // Device line, only when there's something to say.
-        Text {
-          width: parent.width
-          visible: text !== ""
-          text: {
-            var s = root.service
-            if (!s) return ""
-            var parts = []
-            if (s.device && s.device.battery !== undefined) parts.push((s.device.charging ? G.charging : G.battery) + " " + Math.round(s.device.battery) + "%")
-            if (s.usb && s.usb.connected) parts.push(G.usb + " USB")
-            if (s.printer && s.printer.ready) parts.push(G.printer + " printer ready")
-            return parts.join("    ")
-          }
-          color: Util.alpha(root.panelForeground, 0.7)
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.caption
-        }
-
-        PanelSeparator { width: parent.width }
-
-        // Quick actions, two per row.
-        Grid {
-          width: parent.width
-          columns: 2
-          columnSpacing: Style.spacing.md
-          rowSpacing: Style.spacing.md
-          QuickButton { text: "Library"; iconText: G.library; onClicked: root.openWindow({ page: "library" }) }
-          QuickButton { text: "Search"; iconText: G.search; onClicked: root.openWindow({ page: "search" }) }
-          QuickButton { text: "Send files…"; iconText: G.upload; iconSpinning: root.busy("send"); onClicked: { if (root.service) root.service.pickAndSend(); root.close() } }
-          QuickButton { text: "Send screenshot"; iconText: G.screenshot; iconSpinning: root.busy("screenshot"); onClicked: if (root.service) root.service.sendScreenshot() }
-          QuickButton { text: "Send copied link"; iconText: G.web; iconSpinning: root.busy("web"); onClicked: if (root.service) root.service.sendClipboardUrl() }
-          QuickButton { text: "Today's agenda"; iconText: G.calendar; iconSpinning: root.busy("agenda"); onClicked: if (root.service) root.service.sendAgenda() }
-        }
-
-        PanelSeparator { width: parent.width; visible: recentRepeater.count > 0 }
-        PanelSectionHeader { text: "Recent"; foreground: root.panelForeground; visible: recentRepeater.count > 0 }
-
-        Repeater {
-          id: recentRepeater
-          model: root.service && root.service.paired ? root.service.recent.slice(0, root.recentCount) : []
-          delegate: Rectangle {
-            required property var modelData
-            width: content.width
-            height: Style.space(48)
-            radius: Style.cornerRadius
-            color: rowMouse.containsMouse ? Util.alpha(root.panelForeground, 0.07) : "transparent"
-            Component.onCompleted: if (root.service) root.service.requestThumb(modelData.id)
-
-            RowLayout {
-              anchors.fill: parent
-              anchors.leftMargin: Style.spacing.md
-              anchors.rightMargin: Style.spacing.md
-              spacing: Style.spacing.lg
-              Rectangle {
-                Layout.preferredWidth: Style.space(30)
-                Layout.preferredHeight: Style.space(40)
-                color: "#f4f2ec"
-                clip: true
-                Image {
-                  anchors.fill: parent
-                  source: root.service ? root.service.thumb(modelData.id) : ""
-                  fillMode: Image.PreserveAspectCrop
-                  verticalAlignment: Image.AlignTop
-                  asynchronous: true
-                  cache: false
-                }
-              }
-              ColumnLayout {
-                Layout.fillWidth: true
-                spacing: 0
-                Text {
-                  Layout.fillWidth: true
-                  text: modelData.name
-                  color: root.panelForeground
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.body
-                  elide: Text.ElideRight
-                }
-                Text {
-                  Layout.fillWidth: true
-                  text: Fmt.modified(modelData.modified) + " · " + String(modelData.path).replace(/\/[^\/]*$/, "").replace(/^\//, "")
-                  color: Util.alpha(root.panelForeground, 0.6)
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-                  elide: Text.ElideRight
-                }
+          PanelHero {
+            width: parent.width
+            title: "reMarkable"
+            meta: root.statusText()
+            foreground: root.panelForeground
+            fontFamily: root.fontFamily
+            iconComponent: Component {
+              Text {
+                text: G.tablet
+                color: Commons.Color.accent
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.display
               }
             }
-            MouseArea {
-              id: rowMouse
-              anchors.fill: parent
-              hoverEnabled: true
-              cursorShape: Qt.PointingHandCursor
-              onClicked: root.openWindow({ id: modelData.id })
+            trailingControl: Component {
+              PanelActionButton {
+                iconText: G.refresh
+                tooltipText: "Check the cloud now"
+                foreground: root.panelForeground
+                onClicked: if (root.service) root.service.refresh()
+              }
             }
           }
-        }
 
-        Text {
-          width: parent.width
-          visible: !!(root.service && root.service.notice)
-          text: root.service ? root.service.notice : ""
-          color: root.service && root.service.noticeIsError ? Commons.Color.urgent : Util.alpha(root.panelForeground, 0.75)
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.caption
-          wrapMode: Text.WordWrap
+          // Device line, only when there's something to say.
+          Text {
+            width: parent.width
+            visible: text !== ""
+            text: {
+              var s = root.service
+              if (!s) return ""
+              var parts = []
+              if (s.device && s.device.battery !== undefined) parts.push((s.device.charging ? G.charging : G.battery) + " " + Math.round(s.device.battery) + "%")
+              if (s.usb && s.usb.connected) parts.push(G.usb + " USB")
+              if (s.printer && s.printer.ready) parts.push(G.printer + " printer ready")
+              return parts.join("    ")
+            }
+            color: Util.alpha(root.panelForeground, 0.7)
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+
+          PanelSeparator { width: parent.width }
+
+          // Quick actions, two per row.
+          Grid {
+            width: parent.width
+            columns: 2
+            columnSpacing: Style.spacing.md
+            rowSpacing: Style.spacing.md
+            QuickButton { text: "Library"; iconText: G.library; onClicked: root.openWindow({ page: "library" }) }
+            QuickButton { text: "Search"; iconText: G.search; onClicked: root.openWindow({ page: "search" }) }
+            QuickButton { text: "Send files…"; iconText: G.upload; iconSpinning: root.busy("send"); onClicked: { if (root.service) root.service.pickAndSend(); root.close() } }
+            QuickButton { text: "Send screenshot"; iconText: G.screenshot; iconSpinning: root.busy("screenshot"); onClicked: if (root.service) root.service.sendScreenshot() }
+            QuickButton { text: "Send copied link"; iconText: G.web; iconSpinning: root.busy("web"); onClicked: if (root.service) root.service.sendClipboardUrl() }
+            QuickButton { text: "Today's agenda"; iconText: G.calendar; iconSpinning: root.busy("agenda"); onClicked: if (root.service) root.service.sendAgenda() }
+          }
+
+          PanelSeparator { width: parent.width; visible: recentRepeater.count > 0 }
+          PanelSectionHeader { text: "Recent"; foreground: root.panelForeground; visible: recentRepeater.count > 0 }
+
+          Repeater {
+            id: recentRepeater
+            model: root.service && root.service.paired ? root.service.recent.slice(0, root.recentCount) : []
+            delegate: Rectangle {
+              required property var modelData
+              width: content.width
+              height: Style.space(48)
+              radius: Style.cornerRadius
+              color: rowMouse.containsMouse ? Util.alpha(root.panelForeground, 0.07) : "transparent"
+              Component.onCompleted: if (root.service) root.service.requestThumb(modelData.id)
+
+              RowLayout {
+                anchors.fill: parent
+                anchors.leftMargin: Style.spacing.md
+                anchors.rightMargin: Style.spacing.md
+                spacing: Style.spacing.lg
+                Rectangle {
+                  Layout.preferredWidth: Style.space(30)
+                  Layout.preferredHeight: Style.space(40)
+                  color: "#f4f2ec"
+                  clip: true
+                  Image {
+                    anchors.fill: parent
+                    source: root.service ? root.service.thumb(modelData.id) : ""
+                    fillMode: Image.PreserveAspectCrop
+                    verticalAlignment: Image.AlignTop
+                    asynchronous: true
+                    cache: false
+                  }
+                }
+                ColumnLayout {
+                  Layout.fillWidth: true
+                  spacing: 0
+                  Text {
+                    Layout.fillWidth: true
+                    text: modelData.name
+                    color: root.panelForeground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.body
+                    elide: Text.ElideRight
+                  }
+                  Text {
+                    Layout.fillWidth: true
+                    text: Fmt.modified(modelData.modified) + " · " + String(modelData.path).replace(/\/[^\/]*$/, "").replace(/^\//, "")
+                    color: Util.alpha(root.panelForeground, 0.6)
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                    elide: Text.ElideRight
+                  }
+                }
+              }
+              MouseArea {
+                id: rowMouse
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.openWindow({ id: modelData.id })
+              }
+            }
+          }
+
+          Text {
+            width: parent.width
+            visible: !!(root.service && root.service.notice)
+            text: root.service ? root.service.notice : ""
+            color: root.service && root.service.noticeIsError ? Commons.Color.urgent : Util.alpha(root.panelForeground, 0.75)
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.WordWrap
+          }
         }
       }
     }
   }
 
   component QuickButton: Button {
-    width: (content.width - Style.spacing.md) / 2
+    width: (parent.width - Style.spacing.md) / 2
     bordered: true
     leftAlign: true
     foreground: root.panelForeground
